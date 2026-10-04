@@ -1,7 +1,7 @@
 # ROS
 
 Sistema de investigación profunda y monitorización de fuentes, para la terminal.
-Requisitos del producto: [`docs/specs.txt`](docs/specs.txt). Diseño de referencia: [`docs/2026-09-15-ros-complete-application-design.md`](docs/2026-09-15-ros-complete-application-design.md).
+Requisitos del producto: [`docs/specs.txt`](docs/specs.txt). Diseño de referencia: [`docs/2026-09-15-ros-complete-application-design.md`](docs/2026-09-15-ros-complete-application-design.md). Plan por fases: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Estado: en construcción (aún no se puede usar)
 
