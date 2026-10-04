@@ -1,0 +1,562 @@
+# ROS — Descripción de la aplicación
+
+## Visión del producto
+
+ROS será una aplicación autónoma de investigación, recopilación y seguimiento de información.
+
+Su propósito es investigar temas en profundidad, vigilar fuentes de forma continua, descubrir información relevante que el usuario no sabía que debía buscar y convertir grandes cantidades de contenido disperso en conocimiento organizado, verificable y útil.
+
+ROS no debe funcionar únicamente como un buscador que responde preguntas. Debe comportarse como un sistema persistente de inteligencia personal capaz de:
+
+- investigar temas complejos;
+- seguir fuentes concretas durante largos periodos;
+- detectar nueva información;
+- relacionar publicaciones procedentes de distintas fuentes;
+- descubrir subtemas, actores y conexiones;
+- recordar lo investigado anteriormente;
+- evitar repetir trabajo;
+- identificar cambios importantes;
+- entregar informes consolidados en momentos adecuados.
+
+El usuario debe poder describir mediante lenguaje natural qué quiere investigar, qué fuentes quiere vigilar, qué considera importante y cómo desea recibir los resultados.
+
+La prioridad inicial del producto es la calidad de la recopilación, el análisis y la organización de la información. La presentación visual avanzada puede desarrollarse posteriormente.
+
+---
+
+## Punto de partida
+
+El proyecto actual ya contiene un prototipo funcional en Python con una interfaz de línea de comandos y componentes para:
+
+- planificar investigaciones;
+- generar consultas;
+- buscar información en la web;
+- extraer contenido;
+- sintetizar resultados;
+- producir informes;
+- guardar parte del estado en SQLite;
+- utilizar distintos proveedores de búsqueda y modelos de lenguaje.
+
+Este código debe utilizarse como base, pero primero debe corregirse y estabilizarse antes de añadir las funciones autónomas.
+
+Actualmente existen limitaciones importantes:
+
+- las métricas de coste, tiempo y tokens no están conectadas correctamente;
+- algunos límites de investigación no se respetan;
+- el sistema puede descargar fuentes duplicadas;
+- el análisis adaptativo entre rondas no funciona de forma completa;
+- la memoria almacenada es insuficiente para reanudar una investigación;
+- algunos errores de red y de modelos se ocultan o interrumpen el proceso;
+- las restricciones por plataforma son débiles;
+- no existe todavía un scheduler persistente;
+- no existen procesos de monitorización continua;
+- todavía no hay conectores nativos para redes sociales;
+- no existe un sistema real de eventos, correlación, digestos y notificaciones.
+
+La evolución del producto debe conservar las partes útiles del prototipo, corregir primero estos problemas y después ampliar su arquitectura.
+
+---
+
+## Funciones principales
+
+### 1. Investigación profunda
+
+El usuario podrá solicitar una investigación escribiendo una pregunta, objetivo o descripción libre.
+
+Ejemplos:
+
+- investigar un mercado;
+- estudiar una tecnología;
+- analizar una empresa;
+- comprender una controversia;
+- buscar opiniones reales sobre un producto;
+- comparar perspectivas de distintas comunidades;
+- analizar tendencias;
+- descubrir riesgos, oportunidades o información poco visible.
+
+ROS deberá transformar la petición en un plan de investigación formado por preguntas, subtemas, fuentes potenciales y criterios de finalización.
+
+La investigación se ejecutará en rondas:
+
+1. interpretar el objetivo;
+2. identificar lo que ya se sabe;
+3. detectar información faltante;
+4. generar consultas;
+5. seleccionar fuentes;
+6. recopilar y extraer contenido;
+7. evaluar la evidencia;
+8. identificar contradicciones y vacíos;
+9. descubrir nuevos subtemas;
+10. decidir qué investigar en la siguiente ronda;
+11. detenerse cuando se alcance suficiente cobertura o se agote el presupuesto;
+12. generar el informe final.
+
+Cada ronda deberá utilizar los resultados de las rondas anteriores. El sistema no debe generar todas las consultas al principio y ejecutarlas sin revisar lo aprendido.
+
+---
+
+### 2. Descubrimiento de información desconocida
+
+ROS deberá buscar más allá de las preguntas expresadas directamente por el usuario.
+
+Durante una investigación debe intentar descubrir:
+
+- conceptos relacionados;
+- terminología especializada;
+- personas, organizaciones y comunidades relevantes;
+- dependencias;
+- causas y consecuencias;
+- controversias;
+- argumentos opuestos;
+- riesgos;
+- excepciones;
+- casos poco conocidos;
+- preguntas que todavía no tienen respuesta;
+- temas que aparecen repetidamente en fuentes independientes;
+- conexiones entre asuntos que inicialmente parecían separados.
+
+Cada descubrimiento deberá clasificarse según su relevancia y nivel de evidencia. Los nuevos subtemas importantes podrán incorporarse automáticamente al plan, respetando los límites definidos por el usuario.
+
+---
+
+### 3. Monitorización activa
+
+El usuario podrá crear seguimientos permanentes o temporales sobre:
+
+- sitios web;
+- páginas específicas;
+- cuentas sociales;
+- canales de YouTube;
+- comunidades de Reddit;
+- búsquedas;
+- palabras clave;
+- empresas;
+- personas;
+- productos;
+- competidores;
+- temas;
+- documentos;
+- feeds RSS;
+- otras fuentes compatibles.
+
+Cada seguimiento deberá incluir una descripción en lenguaje natural de la información que el usuario considera importante.
+
+Ejemplo:
+
+> Sigue estas cuentas de Instagram y estos canales de YouTube. Me interesa cualquier anuncio sobre nuevos productos, cambios de precio, colaboraciones, expansiones, problemas reportados por usuarios o modificaciones importantes en su estrategia.
+
+ROS convertirá esa descripción en una configuración de seguimiento estructurada.
+
+---
+
+### 4. Recopilación periódica
+
+El sistema deberá contar con un servicio persistente que ejecute los seguimientos automáticamente.
+
+Cada ejecución tendrá que:
+
+1. consultar las fuentes configuradas;
+2. identificar contenido nuevo;
+3. comparar el contenido con el estado anterior;
+4. descartar duplicados;
+5. detectar modificaciones;
+6. extraer texto y metadatos;
+7. evaluar relevancia;
+8. guardar evidencia;
+9. relacionar el contenido con otros eventos;
+10. actualizar la memoria del seguimiento;
+11. decidir si corresponde preparar o enviar un informe.
+
+El sistema debe conservar cursores, fechas, identificadores, versiones y huellas de contenido para no procesar repetidamente la misma información.
+
+---
+
+### 5. Correlación entre fuentes
+
+ROS no debe notificar cada publicación de forma aislada.
+
+Debe acumular eventos relacionados y detectar cuándo varias fuentes hablan del mismo asunto. Por ejemplo:
+
+- varias cuentas anuncian productos relacionados;
+- distintos usuarios reportan el mismo problema;
+- una noticia produce reacciones en Reddit, YouTube y redes sociales;
+- varias empresas realizan movimientos similares;
+- diferentes fuentes confirman, contradicen o amplían una información.
+
+El sistema deberá formar grupos temáticos de eventos y explicar:
+
+- qué sucedió;
+- qué fuentes participaron;
+- cómo se relacionan;
+- qué cambió;
+- por qué podría ser relevante;
+- qué partes están confirmadas;
+- qué afirmaciones siguen siendo inciertas;
+- qué convendría seguir observando.
+
+---
+
+### 6. Informes agrupados
+
+En lugar de interrumpir constantemente al usuario, ROS deberá preparar informes acumulativos.
+
+Los informes podrán generarse:
+
+- a una hora determinada;
+- diariamente;
+- semanalmente;
+- cuando se acumule suficiente información;
+- cuando ocurra un cambio importante;
+- cuando se detecte una situación urgente;
+- cuando el usuario los solicite.
+
+Un informe de seguimiento deberá incluir:
+
+- periodo cubierto;
+- resumen ejecutivo;
+- acontecimientos principales;
+- grupos temáticos;
+- fuentes y enlaces;
+- cronología;
+- conexiones detectadas;
+- contradicciones;
+- nivel de confianza;
+- novedades respecto al informe anterior;
+- posibles implicaciones;
+- preguntas abiertas;
+- asuntos que ROS continuará vigilando.
+
+El usuario podrá elegir entre recibir un digest programado o recibir alertas inmediatas para eventos que superen un umbral de importancia.
+
+---
+
+## Fuentes de información
+
+ROS deberá tener una arquitectura de conectores extensible.
+
+Las primeras integraciones recomendadas son:
+
+1. páginas web y buscadores;
+2. RSS y Atom;
+3. Reddit;
+4. YouTube;
+5. APIs y fuentes estructuradas;
+6. X;
+7. Instagram;
+8. Facebook;
+9. otras plataformas definidas posteriormente.
+
+Reddit y YouTube deben priorizarse porque ofrecen contenido útil para investigación, metadatos ricos y opciones de integración más realistas.
+
+Instagram, Facebook y X deberán implementarse únicamente mediante métodos autorizados y técnicamente sostenibles. La aplicación no debe presentar una plataforma como disponible si no existe un conector funcional.
+
+Cada conector debe exponer un contrato común para:
+
+- validar una fuente;
+- consultar contenido;
+- obtener contenido desde un cursor;
+- normalizar resultados;
+- detectar contenido nuevo o modificado;
+- informar errores y restricciones;
+- administrar límites de uso;
+- indicar qué capacidades admite.
+
+---
+
+## Evaluación de fuentes y evidencia
+
+ROS deberá separar claramente:
+
+- contenido recopilado;
+- afirmaciones extraídas;
+- evidencia que respalda cada afirmación;
+- interpretaciones generadas por el modelo;
+- conclusiones;
+- incertidumbres.
+
+Cada fuente deberá evaluarse según:
+
+- relevancia;
+- actualidad;
+- autoridad;
+- independencia;
+- relación directa con el tema;
+- consistencia con otras fuentes;
+- posibles conflictos de interés;
+- calidad del contenido;
+- disponibilidad de evidencia primaria.
+
+El sistema debe preferir fuentes primarias cuando estén disponibles, pero también utilizar comunidades y redes sociales para descubrir experiencias, señales, opiniones, rumores y temas emergentes.
+
+Los rumores no deben descartarse automáticamente, pero sí etiquetarse como información no confirmada.
+
+Toda conclusión importante debe poder rastrearse hasta sus fuentes.
+
+---
+
+## Memoria del sistema
+
+ROS debe mantener memoria persistente de:
+
+- investigaciones;
+- planes;
+- consultas;
+- rondas;
+- fuentes consultadas;
+- documentos recuperados;
+- contenido extraído;
+- afirmaciones;
+- evidencia;
+- hallazgos;
+- contradicciones;
+- subtemas descubiertos;
+- decisiones del agente;
+- errores;
+- costes;
+- tokens;
+- tiempo utilizado;
+- seguimientos;
+- ejecuciones;
+- eventos;
+- digestos;
+- notificaciones.
+
+El sistema deberá diferenciar tres niveles de memoria:
+
+### Memoria de ejecución
+
+Estado necesario para continuar una tarea interrumpida.
+
+### Memoria del seguimiento
+
+Historial de una fuente o tema, contenido ya visto, cambios y último cursor procesado.
+
+### Memoria de conocimiento
+
+Hallazgos consolidados que pueden reutilizarse en futuras investigaciones.
+
+Una tarea interrumpida debe poder reanudarse sin comenzar desde cero.
+
+---
+
+## Configuración mediante lenguaje natural
+
+El usuario podrá controlar ROS con instrucciones como:
+
+> Investiga esta empresa y presta especial atención a problemas legales, opiniones de empleados y señales de dificultades financieras.
+
+> Revisa estas fuentes cada cuatro horas, pero entrégame un solo informe al final del día.
+
+> Avísame inmediatamente si aparece una vulnerabilidad crítica o si varias fuentes independientes reportan el mismo problema.
+
+> Sigue estas cuentas y detecta lanzamientos, colaboraciones, cambios de estrategia y reacciones negativas de los usuarios.
+
+ROS deberá convertir estas instrucciones en objetos de configuración editables que incluyan:
+
+- objetivo;
+- fuentes;
+- temas;
+- exclusiones;
+- frecuencia;
+- nivel de profundidad;
+- presupuesto;
+- condiciones de relevancia;
+- criterios de alerta;
+- horario del informe;
+- formato de salida;
+- duración del seguimiento.
+
+El usuario siempre deberá poder revisar y modificar esta configuración.
+
+---
+
+## Control y autonomía
+
+ROS podrá tomar decisiones operativas sin pedir permiso continuamente, como:
+
+- reformular consultas;
+- abrir nuevos subtemas;
+- descartar duplicados;
+- volver a intentar una fuente;
+- sustituir una fuente inaccesible;
+- priorizar evidencia;
+- detener una línea de investigación poco productiva;
+- agrupar acontecimientos relacionados;
+- preparar un informe.
+
+Las acciones deberán mantenerse dentro de los límites configurados.
+
+El sistema deberá solicitar intervención cuando:
+
+- necesite credenciales;
+- una fuente requiera autorización;
+- una operación pueda generar un coste fuera del presupuesto;
+- existan varias interpretaciones con consecuencias muy diferentes;
+- una acción externa sea irreversible;
+- el usuario deba tomar una decisión de producto.
+
+---
+
+## Presupuestos y límites
+
+Cada investigación o seguimiento deberá permitir configurar:
+
+- máximo de fuentes;
+- máximo de rondas;
+- tiempo máximo;
+- coste máximo;
+- tokens máximos;
+- profundidad;
+- concurrencia;
+- reintentos;
+- frecuencia;
+- retención de datos.
+
+Los límites deben medirse de forma real y detener el proceso correctamente.
+
+Cuando se alcance un límite, ROS deberá conservar el progreso y producir el mejor resultado posible con una explicación de lo que quedó pendiente.
+
+---
+
+## Manejo de errores
+
+Los fallos no deben ocultarse ni destruir el progreso.
+
+Cada error debe clasificarse, por ejemplo, como:
+
+- credenciales inválidas;
+- falta de saldo;
+- límite de uso;
+- bloqueo de plataforma;
+- contenido eliminado;
+- error temporal;
+- fuente inaccesible;
+- formato no compatible;
+- extracción incompleta;
+- respuesta vacía;
+- error del modelo;
+- error interno.
+
+Cuando sea posible, ROS deberá continuar con otras fuentes y registrar el impacto del fallo sobre el resultado.
+
+No deberá presentar como completa una investigación que perdió una parte esencial de sus fuentes.
+
+---
+
+## Seguridad
+
+Todo contenido externo deberá tratarse como información no confiable.
+
+Las páginas, publicaciones, comentarios y documentos pueden contener texto que intente manipular al agente. Ese contenido nunca deberá modificar las reglas, herramientas, configuración o permisos del sistema.
+
+La aplicación deberá incorporar:
+
+- protección contra prompt injection;
+- validación de URLs;
+- protección contra SSRF;
+- límites de descarga;
+- control de tipos de contenido;
+- almacenamiento seguro de credenciales;
+- separación entre datos externos e instrucciones;
+- registro de acciones;
+- permisos por conector;
+- políticas de retención y eliminación.
+
+---
+
+## Arquitectura esperada
+
+La aplicación deberá separar claramente los siguientes componentes:
+
+- interfaz de usuario o CLI;
+- API;
+- gestor de investigaciones;
+- planificador;
+- motor de ejecución por rondas;
+- conectores;
+- buscadores;
+- extractor;
+- normalizador;
+- evaluador de evidencia;
+- motor de descubrimiento;
+- memoria;
+- scheduler;
+- workers;
+- detector de cambios;
+- correlacionador de eventos;
+- generador de digestos;
+- sistema de notificaciones;
+- configuración;
+- métricas y observabilidad.
+
+Los conectores no deben contener la lógica principal de investigación. El orquestador tampoco debe convertirse en un único archivo responsable de todo el sistema.
+
+Las tareas largas deberán ejecutarse como trabajos persistentes y reanudables. El estado de cada etapa deberá guardarse para resistir cierres, reinicios y errores.
+
+---
+
+## Entidades principales
+
+El modelo de datos deberá contemplar al menos:
+
+- `ResearchProject`
+- `ResearchRun`
+- `ResearchPlan`
+- `ResearchRound`
+- `Query`
+- `Source`
+- `Document`
+- `Claim`
+- `Evidence`
+- `Finding`
+- `WatchSpec`
+- `WatchRun`
+- `SourceCursor`
+- `Snapshot`
+- `ChangeEvent`
+- `EventCluster`
+- `Digest`
+- `Notification`
+- `Budget`
+- `UsageMetric`
+- `ErrorRecord`
+
+Los nombres concretos pueden adaptarse al proyecto, pero las responsabilidades deben mantenerse separadas.
+
+---
+
+## Criterios mínimos de aceptación
+
+La primera versión útil deberá demostrar que puede:
+
+1. realizar una investigación de varias rondas;
+2. modificar el plan según los hallazgos;
+3. respetar todos los límites configurados;
+4. mostrar fuentes y evidencia;
+5. reanudar una tarea interrumpida;
+6. crear un seguimiento sobre varias fuentes;
+7. detectar únicamente contenido nuevo;
+8. evitar duplicados;
+9. relacionar eventos procedentes de fuentes diferentes;
+10. generar un informe acumulado;
+11. distinguir hechos, inferencias y rumores;
+12. explicar errores y resultados parciales;
+13. conservar el historial;
+14. evitar que contenido externo controle al agente.
+
+---
+
+## Resultado esperado
+
+El resultado final debe ser una aplicación mantenible y extensible que combine:
+
+- un investigador profundo;
+- un monitor permanente de fuentes;
+- un sistema de descubrimiento;
+- una memoria de conocimiento;
+- un correlacionador de acontecimientos;
+- un generador de informes.
+
+ROS deberá ayudar al usuario a comprender no solo lo que ocurrió, sino también cómo se conecta, por qué puede importar, qué nivel de confianza existe y qué debería seguir investigándose.
+
+La construcción debe priorizar primero un núcleo fiable y verificable. La autonomía, los nuevos conectores y la interfaz deberán añadirse progresivamente sobre esa base.
