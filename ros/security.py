@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Iterable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -55,6 +56,11 @@ def _host_of(url: str) -> str:
 
 def validate_url(url: str, resolver: Resolver = system_resolver) -> str:
     """Reject anything that is not plain HTTP(S) to a public address (SSRF guard)."""
+    return resolve_public(url, resolver)[0]
+
+
+def resolve_public(url: str, resolver: Resolver = system_resolver) -> tuple[str, list[str]]:
+    """Validate `url` and return (host, public addresses). Every address must be public."""
     host = _host_of(url)
     if host in {"localhost", "localhost.localdomain"} or host.endswith(".local") or host.endswith(".internal"):
         raise RosError(ErrorKind.POLICY_REJECTED, f"local host not allowed: {host}")
@@ -68,7 +74,12 @@ def validate_url(url: str, resolver: Resolver = system_resolver) -> str:
         ip = ipaddress.ip_address(addr.split("%")[0])
         if not ip.is_global or ip.is_multicast:
             raise RosError(ErrorKind.POLICY_REJECTED, f"{host} resolves to non-public address {ip}")
-    return host
+    return host, [a.split("%")[0] for a in addresses]
+
+
+def _proxy_configured() -> bool:
+    proxies = urllib.request.getproxies()
+    return bool(proxies.get("https") or proxies.get("http") or proxies.get("all"))
 
 
 def domain_matches(host: str, allowed: str) -> bool:
@@ -129,12 +140,19 @@ TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain", "application/r
 
 
 class SafeFetcher:
-    """HTTP GET with per-hop SSRF validation, byte cap, MIME allowlist and timeouts."""
+    """HTTP GET with per-hop SSRF validation, byte cap, MIME allowlist and timeouts.
+
+    With `pin_dns` the connection goes to the exact address that was validated (Host header and
+    TLS SNI keep the real name), closing the DNS-rebinding window between check and connect.
+    Behind an HTTP proxy the proxy resolves names, so pinning is off by default in that case.
+    """
 
     def __init__(self, client: httpx.Client | None = None, *, resolver: Resolver = system_resolver,
                  max_bytes: int = 3_000_000, max_redirects: int = 5, timeout: float = 20.0,
-                 user_agent: str = "ROS-research/0.1 (+https://github.com/Fastc0de/ROSE)"):
+                 user_agent: str = "ROS-research/0.1 (+https://github.com/Fastc0de/ROSE)",
+                 pin_dns: bool | None = None):
         self.client = client or httpx.Client(timeout=timeout, follow_redirects=False)
+        self.pin_dns = (not _proxy_configured()) if pin_dns is None else pin_dns
         self.resolver = resolver
         self.max_bytes = max_bytes
         self.max_redirects = max_redirects
@@ -144,11 +162,12 @@ class SafeFetcher:
             allowed_types: tuple[str, ...] = TEXT_TYPES) -> FetchResponse:
         current = url
         for _ in range(self.max_redirects + 1):
-            validate_url(current, self.resolver)
+            _, addresses = resolve_public(current, self.resolver)
             req_headers = {"User-Agent": self.user_agent, "Accept": ", ".join(allowed_types) + ";q=0.9, */*;q=0.1"}
             req_headers.update(headers or {})
+            target, extensions = self._pinned(current, addresses[0], req_headers)
             try:
-                with self.client.stream("GET", current, headers=req_headers) as resp:
+                with self.client.stream("GET", target, headers=req_headers, extensions=extensions) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         location = resp.headers.get("location")
                         if not location:
@@ -179,6 +198,14 @@ class SafeFetcher:
             except httpx.TransportError as exc:
                 raise RosError(ErrorKind.SOURCE_UNREACHABLE, f"network error fetching {current}: {exc}") from exc
         raise RosError(ErrorKind.SOURCE_UNREACHABLE, f"too many redirects from {url}")
+
+    def _pinned(self, url: str, address: str, headers: dict[str, str]) -> tuple[httpx.URL | str, dict]:
+        if not self.pin_dns:
+            return url, {}
+        parsed = httpx.URL(url)
+        headers["Host"] = parsed.netloc.decode("ascii")
+        extensions = {"sni_hostname": parsed.raw_host.decode("ascii")} if parsed.scheme == "https" else {}
+        return parsed.copy_with(host=address), extensions
 
     @staticmethod
     def _raise_for_status(resp: httpx.Response, url: str) -> None:

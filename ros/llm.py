@@ -64,18 +64,22 @@ class LLM:
         if ledger:
             ledger.reserve_llm(est_in, max_tokens, est_cost)
         in_tok = out_tok = 0
+        served = self.model
         try:
-            data, in_tok, out_tok = self._call(purpose=purpose, system=system, user=user, schema=schema,
-                                               max_tokens=max_tokens)
+            data, in_tok, out_tok, served = self._call(purpose=purpose, system=system, user=user, schema=schema,
+                                                       max_tokens=max_tokens)
             return data
         finally:
             if ledger:
-                cost = (in_tok * in_price + out_tok * out_price) / 1_000_000
-                ledger.settle_llm(est_in, max_tokens, est_cost, purpose=purpose, model=self.model,
+                # A server-side fallback may have answered with another model: bill at its price.
+                s_in, s_out = price(served)
+                cost = (in_tok * s_in + out_tok * s_out) / 1_000_000
+                ledger.settle_llm(est_in, max_tokens, est_cost, purpose=purpose, model=served,
                                   input_tokens=in_tok, output_tokens=out_tok, cost=cost)
 
     def _call(self, *, purpose: str, system: str, user: str, schema: dict, max_tokens: int
-              ) -> tuple[dict, int, int]:
+              ) -> tuple[dict, int, int, str]:
+        """Returns (data, input_tokens, output_tokens, model_that_served_the_request)."""
         raise NotImplementedError
 
 
@@ -95,18 +99,18 @@ class AnthropicLLM(LLM):
                            "no Anthropic credentials: set ANTHROPIC_API_KEY (or run `ant auth login`)") from exc
 
     def _call(self, *, purpose: str, system: str, user: str, schema: dict, max_tokens: int
-              ) -> tuple[dict, int, int]:
+              ) -> tuple[dict, int, int, str]:
         a = self._anthropic
-        extra: dict[str, Any] = {"output_config": {"effort": self.effort,
-                                                   "format": {"type": "json_schema", "schema": schema}}}
-        betas: list[str] = []
+        kwargs: dict[str, Any] = {}
         if self.model in FALLBACK_MODELS:
-            extra["fallbacks"] = "default"
-            betas.append("server-side-fallback-2026-07-01")
+            # On a safety refusal the API re-runs the request on a fallback model chosen by category.
+            kwargs.update(fallbacks="default", betas=["server-side-fallback-2026-07-01"])
         try:
             with self.client.beta.messages.stream(
                 model=self.model, max_tokens=max_tokens, system=system,
-                messages=[{"role": "user", "content": user}], betas=betas, extra_body=extra,
+                messages=[{"role": "user", "content": user}],
+                output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
+                **kwargs,
             ) as stream:
                 msg = stream.get_final_message()
         except a.AuthenticationError as exc:
@@ -128,18 +132,20 @@ class AnthropicLLM(LLM):
         in_tok = (usage.input_tokens or 0) + (getattr(usage, "cache_creation_input_tokens", 0) or 0) \
             + (getattr(usage, "cache_read_input_tokens", 0) or 0)
         out_tok = usage.output_tokens or 0
+        served = getattr(msg, "model", None) or self.model
         if msg.stop_reason == "refusal":
-            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"model declined the {purpose} request"), in_tok, out_tok)
+            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"model declined the {purpose} request"), in_tok, out_tok, served)
         if msg.stop_reason == "max_tokens":
             raise _UsageCarrier(RosError(ErrorKind.EXTRACTION_INCOMPLETE,
-                                         f"model output for {purpose} hit max_tokens={max_tokens}"), in_tok, out_tok)
+                                         f"model output for {purpose} hit max_tokens={max_tokens}"), in_tok, out_tok, served)
         text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
         if not text.strip():
-            raise _UsageCarrier(RosError(ErrorKind.EMPTY_RESPONSE, f"empty model response for {purpose}"), in_tok, out_tok)
+            raise _UsageCarrier(RosError(ErrorKind.EMPTY_RESPONSE, f"empty model response for {purpose}"), in_tok, out_tok, served)
         try:
-            return json.loads(text), in_tok, out_tok
+            return json.loads(text), in_tok, out_tok, served
         except json.JSONDecodeError as exc:
-            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"invalid JSON from model for {purpose}"), in_tok, out_tok) from exc
+            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"invalid JSON from model for {purpose}"),
+                                in_tok, out_tok, served) from exc
 
     def complete_json(self, **kwargs: Any) -> dict:
         # Unwrap usage-carrying errors so that tokens spent on failed calls are still billed to the ledger.
@@ -148,17 +154,17 @@ class AnthropicLLM(LLM):
             return super().complete_json(**kwargs)
         except _UsageCarrier as carrier:
             if ledger:
-                in_price, out_price = price(self.model)
-                ledger.record("llm", purpose=kwargs["purpose"] + ":failed", model=self.model,
+                in_price, out_price = price(carrier.model)
+                ledger.record("llm", purpose=kwargs["purpose"] + ":failed", model=carrier.model,
                               input_tokens=carrier.in_tok, output_tokens=carrier.out_tok,
                               cost_usd=(carrier.in_tok * in_price + carrier.out_tok * out_price) / 1_000_000)
             raise carrier.error from None
 
 
 class _UsageCarrier(Exception):
-    def __init__(self, error: RosError, in_tok: int, out_tok: int):
+    def __init__(self, error: RosError, in_tok: int, out_tok: int, model: str):
         super().__init__(str(error))
-        self.error, self.in_tok, self.out_tok = error, in_tok, out_tok
+        self.error, self.in_tok, self.out_tok, self.model = error, in_tok, out_tok, model
 
 
 Handler = Callable[[str, str, str, dict], dict]
@@ -173,7 +179,7 @@ class FakeLLM(LLM):
         self.calls: list[tuple[str, str]] = []
 
     def _call(self, *, purpose: str, system: str, user: str, schema: dict, max_tokens: int
-              ) -> tuple[dict, int, int]:
+              ) -> tuple[dict, int, int, str]:
         self.calls.append((purpose, user))
         data = self.handler(purpose, system, user, schema)
-        return data, estimate_tokens(system) + estimate_tokens(user), estimate_tokens(json.dumps(data))
+        return data, estimate_tokens(system) + estimate_tokens(user), estimate_tokens(json.dumps(data)), self.model

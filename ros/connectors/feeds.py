@@ -101,7 +101,7 @@ def parse_feed(xml_text: str) -> tuple[str, list[NormalizedItem]]:
 
 def _clean(body: str) -> str:
     if "<" in body and ">" in body:
-        return html_to_text(body)["text"] or re.sub(r"<[^>]+>", " ", body).strip()
+        return html_to_text(body)["text"] or " ".join(re.sub(r"<[^>]+>", " ", body).split())
     return body
 
 

@@ -27,7 +27,7 @@ class Budget:
     max_subtopics: int = 6          # depth: how many discovered subtopics may join the plan
     concurrency: int = 4
     retries: int = 2
-    final_reserve: float = 0.15     # fraction of cost/tokens kept for the final report
+    final_reserve: float = 0.30     # fraction of cost/tokens kept for the final report (must cover its worst case)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Budget":

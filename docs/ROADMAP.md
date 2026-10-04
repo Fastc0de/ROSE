@@ -20,20 +20,20 @@ Reglas para todas las fases:
 
 | Módulo | Qué hace | Estado |
 |---|---|---|
-| `ros/security.py` | SSRF por salto, límite de bytes, MIME permitidos, URL canónica, aislamiento anti prompt injection | Hecho, falta fijar la IP resuelta (ver Fase 0) |
+| `ros/security.py` | SSRF por salto, límite de bytes, MIME permitidos, URL canónica, aislamiento anti prompt injection | Hecho; conexión fijada a la IP validada |
 | `ros/db.py` | SQLite + WAL, migraciones con checksum, FTS5, backup en línea, locks | Hecho; el esquema ya incluye tablas de seguimientos, eventos y digestos |
 | `ros/budget.py` | Reserva antes de gastar, tiempo que sobrevive a reinicios | Hecho |
-| `ros/llm.py` | Salidas JSON con esquema, coste medido, errores tipados, `FakeLLM` | Hecho, falta verificarlo contra la API real |
-| `ros/connectors/` | RSS/Atom, YouTube (feed), Reddit (RSS), web con detección de cambios, buscadores | Hecho, sin tests |
-| `ros/research/` | Investigación por rondas con checkpoints e informe Markdown trazable | Hecho, sin tests |
-| `ros/cli.py` | Script `ros` | **No existe**: el script declarado en `pyproject.toml` falla |
-| `ros/offline.py` | Modo `llm="fake"` | **No existe**: `registry.build_llm` lo importa |
+| `ros/llm.py` | Salidas JSON con esquema, coste medido, errores tipados, `FakeLLM` | Hecho y verificado contra el SDK 1.x |
+| `ros/connectors/` | RSS/Atom, YouTube (feed), Reddit (RSS), web con detección de cambios, buscadores | Hecho, con tests |
+| `ros/research/` | Investigación por rondas con checkpoints e informe Markdown trazable | Hecho, con tests de extremo a extremo |
+| `ros/cli.py` | Script `ros` | `ros research`; el resto llega en la Fase 1 |
+| `ros/offline.py` | Modo `llm="fake"` / `--offline` | Hecho |
 | `ros/monitor/` | Seguimientos, eventos, digestos | Vacío |
-| `tests/` | — | **No existe** |
+| `tests/` | Tests sin red, en CI (GitHub Actions) | Hecho |
 
 ---
 
-## Fase 0 — Estabilizar la base
+## Fase 0 — Estabilizar la base ✅
 
 **Objetivo:** que lo que ya existe esté probado y no tenga bugs conocidos antes de construir encima.
 

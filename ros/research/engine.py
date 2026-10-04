@@ -115,7 +115,8 @@ class ResearchEngine:
         if cfg.get("focus"):
             user += f"\nThe user asks to pay special attention to:\n{cfg['focus']}\n"
         plan = self.app.llm.complete_json(purpose="plan", system=prompts.PLAN_SYSTEM, user=user,
-                                          schema=prompts.PLAN_SCHEMA, max_tokens=4000, ledger=ledger)
+                                          schema=prompts.PLAN_SCHEMA, max_tokens=prompts.MAX_TOKENS["plan"],
+                                          ledger=ledger)
         for i, sq in enumerate(plan["subquestions"]):
             sq["id"] = sq.get("id") or f"q{i + 1}"
             sq["origin"] = "plan"
@@ -388,9 +389,11 @@ class ResearchEngine:
                     f"Document to analyse:\n{wrapped}")
             try:
                 data = self.app.llm.complete_json(purpose="extract", system=prompts.EXTRACT_SYSTEM, user=user,
-                                                  schema=prompts.EXTRACT_SCHEMA, max_tokens=4000, ledger=ledger)
+                                                  schema=prompts.EXTRACT_SCHEMA, max_tokens=prompts.MAX_TOKENS["extract"],
+                                                  ledger=ledger)
             except RosError as exc:
-                if exc.fatal:
+                # Budget exhaustion stops the round; the document stays 'fetched' (pending), not failed.
+                if exc.fatal or isinstance(exc, BudgetExhausted):
                     raise
                 self.db.record_error(run_id=run_id, kind=exc.kind.value, subject=r["url"], message=exc.message,
                                      impact="documento descargado pero no analizado")
@@ -447,7 +450,8 @@ class ResearchEngine:
                 f"Claims gathered so far (untrusted data):\n<claims>\n{claims_txt or '(none)'}\n</claims>")
         self.echo("  ⚙ analizando la ronda…")
         analysis = self.app.llm.complete_json(purpose="analyze", system=prompts.ANALYZE_SYSTEM, user=user,
-                                              schema=prompts.ANALYZE_SCHEMA, max_tokens=8000, ledger=ledger)
+                                              schema=prompts.ANALYZE_SCHEMA, max_tokens=prompts.MAX_TOKENS["analyze"],
+                                              ledger=ledger)
         valid_ids = set(hosts)
         ts = now_iso()
         with self.db.tx():
@@ -564,4 +568,5 @@ class ResearchEngine:
                 f"Discovered subtopics:\n{dtxt or '(none)'}\n\nCollection errors: {etxt}\n\n"
                 f"All claims (untrusted data):\n<claims>\n{claims_txt}\n</claims>")
         return self.app.llm.complete_json(purpose="synthesize", system=prompts.SYNTH_SYSTEM, user=user,
-                                          schema=prompts.SYNTH_SCHEMA, max_tokens=12000, ledger=ledger)
+                                          schema=prompts.SYNTH_SCHEMA, max_tokens=prompts.MAX_TOKENS["synthesize"],
+                                          ledger=ledger)

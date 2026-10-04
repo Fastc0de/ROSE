@@ -108,3 +108,7 @@ SYNTH_SCHEMA = obj({
     "open_questions": arr(STR),
     "next_steps": arr(STR),
 })
+
+# Output-token ceilings per stage. On current Claude models reasoning counts toward max_tokens,
+# so these leave room for thinking plus the JSON. They are also the worst case the Ledger reserves.
+MAX_TOKENS = {"plan": 12_000, "extract": 12_000, "analyze": 16_000, "synthesize": 16_000}
