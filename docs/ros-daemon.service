@@ -2,7 +2,7 @@
 #   cp docs/ros-daemon.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now ros-daemon
 #   journalctl --user -u ros-daemon -f
-# Pon OPENROUTER_API_KEY y demás secretos en ~/.config/ros/env (permisos 600).
+# Pon OPENCODE_API_KEY y demás secretos en ~/.config/ros/env (permisos 600).
 
 [Unit]
 Description=ROS daemon: seguimientos, digestos e investigaciones en cola

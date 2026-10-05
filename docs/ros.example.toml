@@ -5,15 +5,19 @@
 # reports_dir = "~/.ros/reports"
 timezone = "Europe/Madrid"            # zona de los horarios ("a las 20:00")
 
-# Proveedor de modelos: openrouter | anthropic | fake
-llm = "openrouter"
-openrouter_model = "spastealth/space-bunny-alpha"   # todos los roles, salvo los que fijes abajo
-# openrouter_api_key_env = "OPENROUTER_API_KEY"      # la clave va en esa variable de entorno, nunca aquí
+# Proveedor de modelos: opencode | openrouter | anthropic | fake
+llm = "opencode"
+# opencode_api_key_env = "OPENCODE_API_KEY"         # la clave va en esa variable de entorno, nunca aquí
+# opencode_base_url = "https://opencode.ai/zen/go/v1"   # OpenCode Go; para Zen: https://opencode.ai/zen/v1
 
-# Modelo por rol (vacío = el del proveedor)
-# orchestrator_model = ""
-# validator_model = ""
-# worker_model = ""
+# Modelo por rol (vacío = el del proveedor: glm-5.3 / glm-5.3 / deepseek-v4.1-flash en OpenCode)
+# orchestrator_model = "glm-5.3"
+# validator_model = "glm-5.3"
+# worker_model = "deepseek-v4.1-flash"
+
+# OpenRouter (llm = "openrouter")
+# openrouter_model = "openrouter/free"
+# openrouter_api_key_env = "OPENROUTER_API_KEY"
 
 # Búsqueda web: duckduckgo | brave | searxng
 search_backend = "duckduckgo"

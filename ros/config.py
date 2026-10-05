@@ -34,8 +34,10 @@ class Settings:
     worker_model: str = ""
     worker_effort: str = ""
     anthropic_workspace_id: str = ""        # needed when the API key is not scoped to a workspace
-    llm: str = "openrouter"                 # openrouter | anthropic | fake (offline demo, no real analysis)
-    openrouter_model: str = "spastealth/space-bunny-alpha"   # default model for every role on OpenRouter
+    llm: str = "opencode"                   # opencode | openrouter | anthropic | fake (offline demo)
+    opencode_api_key_env: str = "OPENCODE_API_KEY"
+    opencode_base_url: str = "https://opencode.ai/zen/go/v1"   # OpenCode Go; Zen: https://opencode.ai/zen/v1
+    openrouter_model: str = "openrouter/free"   # default model for every role on OpenRouter
     openrouter_api_key_env: str = "OPENROUTER_API_KEY"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     search_backend: str = "duckduckgo"      # duckduckgo | brave | searxng
@@ -80,7 +82,7 @@ class Settings:
         if self.llm == "openrouter":
             default = (self.openrouter_model, "")
         else:
-            default = PROVIDER_DEFAULTS["anthropic"][name]
+            default = PROVIDER_DEFAULTS.get(self.llm, PROVIDER_DEFAULTS["anthropic"])[name]
         return (getattr(self, f"{name}_model") or default[0], getattr(self, f"{name}_effort") or default[1])
 
     def redacted(self) -> dict[str, Any]:
@@ -95,6 +97,8 @@ ROLES = ("orchestrator", "validator", "worker")
 # Per-role defaults when the role's model is not configured. On OpenRouter every role uses
 # `openrouter_model` unless a role model is set explicitly.
 PROVIDER_DEFAULTS = {
+    "opencode": {"orchestrator": ("glm-5.3", ""), "validator": ("glm-5.3", ""),
+                 "worker": ("deepseek-v4.1-flash", "")},
     "anthropic": {"orchestrator": ("claude-opus-5-5", "medium"), "validator": ("claude-sonnet-5-5", "medium"),
                   "worker": ("claude-haiku-4-5", "")},   # Claude Haiku 4.5 does not accept an effort level
 }

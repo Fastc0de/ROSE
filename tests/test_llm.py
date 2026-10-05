@@ -279,3 +279,49 @@ def test_openrouter_never_guesses_missing_required_fields(db):
     assert info.value.kind == ErrorKind.MODEL_ERROR and "faltan" in info.value.message
     row = db.one("SELECT purpose, input_tokens, cost_usd FROM usage")
     assert row["purpose"] == "triage:failed" and row["input_tokens"] == 200 and row["cost_usd"] == pytest.approx(0.0024)
+
+
+# -- OpenCode -------------------------------------------------------------
+
+def _opencode(handler):
+    import httpx
+
+    from ros.llm import OpenCodeLLM
+    return OpenCodeLLM("glm-5.3", api_key="oc_sk_test", client=httpx.Client(transport=httpx.MockTransport(handler)),
+                       sleep=lambda s: None)
+
+
+def test_opencode_identifies_client_and_session_per_run(db):
+    import httpx
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"model": "glm-5.3", "choices": [{"finish_reason": "stop", "message": {
+            "content": '{"title": "t", "kind": "rumor", "items": [], "score": 1}', "reasoning_content": "…"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500}})
+
+    llm = _opencode(handler)
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    assert llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=ledger)["kind"] == "rumor"
+    req = seen[0]
+    assert str(req.url) == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert req.headers["x-opencode-session"] == f"ros-run-{run}"
+    assert req.headers["user-agent"].startswith("ros-research/")
+    assert "usage" not in json.loads(req.content)                      # OpenRouter-only field not sent
+    cost = db.one("SELECT cost_usd FROM usage")["cost_usd"]
+    assert cost == pytest.approx((1000 * 1.40 + 500 * 4.40) / 1_000_000)   # GLM-5.3 Go price
+
+
+def test_opencode_account_settings_error_is_fatal():
+    import httpx
+    llm = _opencode(lambda r: httpx.Response(400, json={"error": {"type": "server_error", "message":
+        "Upstream request failed: This Go model requires Global regions. Select Global in your workspace's "
+        "Privacy settings to use it."}}))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.fatal and "Privacy settings" in info.value.message

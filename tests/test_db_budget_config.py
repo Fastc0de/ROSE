@@ -174,23 +174,25 @@ def test_missing_explicit_config_fails(isolated):
 
 def test_default_model_roles(isolated):
     s = load_settings()
-    assert s.llm == "openrouter"
-    for role in ("orchestrator", "validator", "worker"):
-        assert s.role(role) == ("spastealth/space-bunny-alpha", "")
+    assert s.llm == "opencode"
+    assert s.role("orchestrator") == ("glm-5.3", "")
+    assert s.role("validator") == ("glm-5.3", "")
+    assert s.role("worker") == ("deepseek-v4.1-flash", "")
     with pytest.raises(ValueError):
         s.role("boss")
 
 
 def test_role_models_per_provider(isolated, monkeypatch):
-    (isolated / "ros.toml").write_text('worker_model = "openai/gpt-x"\n')
+    (isolated / "ros.toml").write_text('worker_model = "glm-5.3-flash"\n')
     s = load_settings()
-    assert s.role("worker") == ("openai/gpt-x", "") and s.role("validator")[0] == "spastealth/space-bunny-alpha"
+    assert s.role("worker") == ("glm-5.3-flash", "") and s.role("orchestrator")[0] == "glm-5.3"
+    monkeypatch.setenv("ROS_LLM", "openrouter")
+    assert load_settings().role("validator")[0] == "openrouter/free"
     monkeypatch.setenv("ROS_LLM", "anthropic")
-    monkeypatch.setenv("ROS_OPENROUTER_MODEL", "ignored/when-anthropic")
     s = load_settings()
     assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
     assert s.role("validator") == ("claude-sonnet-5-5", "medium")
-    assert s.role("worker") == ("openai/gpt-x", "")
+    assert s.role("worker") == ("glm-5.3-flash", "")
 
 
 def test_lock_of_a_dead_process_on_this_host_is_released(db):

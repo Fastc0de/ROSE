@@ -22,14 +22,18 @@ Los tests (sin red ni API keys) cubren los 14 criterios de aceptación de `specs
 ## Instalación
 
 Python 3.11+ y [uv](https://docs.astral.sh/uv/). Para el análisis hace falta la clave del proveedor de modelos.
-Por defecto ROS usa [OpenRouter](https://openrouter.ai) con el modelo `spastealth/space-bunny-alpha` para todo:
+Por defecto ROS usa [OpenCode Go](https://opencode.ai/docs/go/): `glm-5.3` para orquestar y validar, y
+`deepseek-v4.1-flash` para la extracción y el triaje.
 
 ```bash
-export OPENROUTER_API_KEY="sk-or-…"     # nunca en ros.toml ni en el repositorio
+export OPENCODE_API_KEY="oc_sk_…"     # nunca en ros.toml ni en el repositorio
 uv sync
-uv run pytest                    # tests, sin red
+uv run pytest                          # tests, sin red
 uv run ros --help
 ```
+
+DeepSeek en OpenCode Go exige activar **Global** en los ajustes de privacidad (Privacy) de tu workspace de OpenCode;
+sin eso, ROS se detiene con ese mensaje.
 
 Cualquier orden acepta `--offline` (o `ROS_LLM=fake`): usa un modelo determinista sin coste para probar el flujo completo.
 
@@ -111,20 +115,25 @@ variable de entorno que los contiene.
 
 ### Proveedor y modelos por rol
 
-| `llm` | Clave | Modelos por defecto |
+| `llm` | Clave | Modelos por defecto (orquestador / validador / worker) |
 |---|---|---|
-| `openrouter` (por defecto) | `OPENROUTER_API_KEY` | `openrouter_model` (`spastealth/space-bunny-alpha`) para los tres roles |
-| `anthropic` | `ANTHROPIC_API_KEY` (+ `ANTHROPIC_WORKSPACE_ID` si hace falta) | orquestador `claude-opus-5-5`, validador `claude-sonnet-5-5`, worker `claude-haiku-4-5` |
+| `opencode` (por defecto) | `OPENCODE_API_KEY` | `glm-5.3` / `glm-5.3` / `deepseek-v4.1-flash` |
+| `openrouter` | `OPENROUTER_API_KEY` | `openrouter_model` (`openrouter/free`) para los tres |
+| `anthropic` | `ANTHROPIC_API_KEY` (+ `ANTHROPIC_WORKSPACE_ID` si hace falta) | `claude-opus-5-5` / `claude-sonnet-5-5` / `claude-haiku-4-5` |
 | `fake` | — | modelo determinista sin coste (`--offline`) |
 
 Roles: el **orquestador** planifica, analiza cada ronda, redacta informes, correlaciona y genera digestos; el
 **validador** revisa que cada conclusión esté respaldada; el **worker** extrae afirmaciones y hace el triaje de
-cada item de los seguimientos. Para usar un modelo distinto en un rol: `worker_model = "…"` en `ros.toml` o
-`ROS_WORKER_MODEL=…`; para cambiar el de todos en OpenRouter: `openrouter_model` o `ROS_OPENROUTER_MODEL`.
+cada item de los seguimientos. Para cambiar el modelo de un rol: `worker_model = "…"` en `ros.toml` o
+`ROS_WORKER_MODEL=…` (igual con `ORCHESTRATOR` y `VALIDATOR`).
 
-Con OpenRouter, ROS pide salida JSON con esquema; si el modelo no la admite, envía el esquema en el prompt y
-normaliza la respuesta. El precio se toma de la lista de modelos de OpenRouter y se factura el coste que
-OpenRouter informa en cada llamada; si no se puede consultar, se reserva el precio más alto conocido.
+Con OpenCode, ROS se identifica con su propio User-Agent y envía una sesión estable (`x-opencode-session`) por
+ejecución, como pide OpenCode. El coste se calcula con los precios publicados de OpenCode Go (DeepSeek a tarifa de
+hora punta, para no quedarse corto). Con OpenRouter se factura el coste que informa OpenRouter.
+
+En ambos casos ROS pide salida JSON con esquema; si el modelo no la admite, envía el esquema en el prompt. Una
+respuesta a la que le falten campos obligatorios se reintenta una vez y, si sigue incompleta, es un error: nunca
+se rellena con valores inventados.
 
 ### Conectores con credenciales
 

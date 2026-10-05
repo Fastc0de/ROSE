@@ -190,53 +190,43 @@ def _billing_failures(llm: LLM, call: Callable[..., dict], kwargs: dict) -> dict
         raise carrier.error from None
 
 
-class OpenRouterLLM(LLM):
-    """Any model on OpenRouter (OpenAI-compatible chat completions) with JSON-schema outputs.
+class ChatCompletionsLLM(LLM):
+    """Any OpenAI-compatible `/chat/completions` endpoint, with JSON-schema outputs.
 
-    Structured output is requested with `response_format: json_schema`. Models that ignore it still
-    get the schema in the prompt; the answer is parsed leniently and conformed to the schema, so the
-    pipeline never sees a missing key. Prices come from OpenRouter's model list (fetched once); if
-    that fails the most expensive known price is reserved, keeping budgets conservative. The cost
-    OpenRouter reports for each call is what gets billed to the ledger.
+    Structured output is requested with `response_format: json_schema`. Models that cannot do it get
+    the schema in the prompt; answers are parsed leniently and conformed to the schema, and an answer
+    that still misses required keys is a typed error (never guessed). Subclasses set the provider's
+    headers, extra request fields and prices.
     """
 
-    _catalog: dict[str, dict[str, tuple[float, float]]] = {}
+    provider = "API"
+    key_hint = "la clave de la API"
 
-    def __init__(self, model: str, *, api_key: str | None, base_url: str = "https://openrouter.ai/api/v1",
-                 client: Any = None, max_retries: int = 3, sleep: Callable[[float], None] | None = None):
+    def __init__(self, model: str, *, api_key: str | None, base_url: str, client: Any = None,
+                 max_retries: int = 3, sleep: Callable[[float], None] | None = None):
         import time
 
         import httpx
         if not api_key:
-            raise RosError(ErrorKind.INVALID_CREDENTIALS,
-                           "falta la clave de OpenRouter: define OPENROUTER_API_KEY (o openrouter_api_key_env)")
+            raise RosError(ErrorKind.INVALID_CREDENTIALS, f"falta {self.key_hint}")
         self._httpx = httpx
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.client = client or httpx.Client(timeout=httpx.Timeout(300.0, connect=20.0))
-        self.headers = {"Authorization": f"Bearer {api_key}", "HTTP-Referer": "https://github.com/Fastc0de/ROSE",
-                        "X-Title": "ROS"}
+        self.headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "ros-research/0.2"}
         self.max_retries = max_retries
         self.sleep = sleep or time.sleep
 
-    # -- prices -------------------------------------------------------------
-    def price_of(self, model: str) -> tuple[float, float]:
-        catalog = self._catalog.get(self.base_url)
-        if catalog is None:
-            catalog = {}
-            try:
-                resp = self.client.get(f"{self.base_url}/models", headers=self.headers, timeout=30.0)
-                for m in resp.json().get("data", []) if resp.status_code == 200 else []:
-                    p = m.get("pricing") or {}
-                    try:
-                        catalog[m["id"]] = (float(p.get("prompt", 0)) * 1_000_000,
-                                            float(p.get("completion", 0)) * 1_000_000)
-                    except (TypeError, ValueError):
-                        continue
-            except Exception:  # noqa: BLE001 - pricing is best effort; reservations fall back to the max
-                pass
-            self._catalog[self.base_url] = catalog
-        return catalog.get(model) or price(model)
+    def extra_body(self) -> dict[str, Any]:
+        return {}
+
+    def request_headers(self) -> dict[str, str]:
+        return self.headers
+
+    def classify(self, code: int, detail: str) -> RosError | None:
+        """Provider-specific error mapping; None falls back to the generic HTTP mapping."""
+        return None
+
 
     # -- calls --------------------------------------------------------------
     def _call(self, *, purpose: str, system: str, user: str, schema: dict, max_tokens: int
@@ -244,7 +234,7 @@ class OpenRouterLLM(LLM):
         instruction = ("\n\nRespond with a single JSON object that matches the requested schema. No prose, no "
                        "markdown fences.")
         body: dict[str, Any] = {
-            "model": self.model, "max_tokens": max_tokens, "usage": {"include": True},
+            "model": self.model, "max_tokens": max_tokens, **self.extra_body(),
             "messages": [{"role": "system", "content": system + instruction}, {"role": "user", "content": user}],
             "response_format": {"type": "json_schema",
                                 "json_schema": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", purpose)[:64],
@@ -326,11 +316,11 @@ class OpenRouterLLM(LLM):
     def _post_once(self, body: dict) -> dict:
         httpx = self._httpx
         try:
-            resp = self.client.post(f"{self.base_url}/chat/completions", json=body, headers=self.headers)
+            resp = self.client.post(f"{self.base_url}/chat/completions", json=body, headers=self.request_headers())
         except httpx.TimeoutException as exc:
-            raise RosError(ErrorKind.TRANSIENT, "OpenRouter: timeout") from exc
+            raise RosError(ErrorKind.TRANSIENT, f"{self.provider}: timeout") from exc
         except httpx.TransportError as exc:
-            raise RosError(ErrorKind.TRANSIENT, f"OpenRouter: {exc}") from exc
+            raise RosError(ErrorKind.TRANSIENT, f"{self.provider}: {exc}") from exc
         try:
             data = resp.json()
         except ValueError:
@@ -339,23 +329,117 @@ class OpenRouterLLM(LLM):
         code = resp.status_code
         if code < 400 and not error:
             return data
+        if not isinstance(error, dict):
+            error = {"message": str(error)} if error else {}
         if error and code < 400:
             code = int(error.get("code") or 500) if str(error.get("code", "")).isdigit() else 500
-        detail = (error or {}).get("message") or resp.text[:300]
-        meta = (error or {}).get("metadata") or {}
+        detail = error.get("message") or resp.text[:300]
+        if error.get("type"):
+            detail = f"{error['type']}: {detail}"
+        meta = error.get("metadata") or {}
         if meta.get("raw"):
             detail += f" ({str(meta['raw'])[:200]})"
+        name = self.provider
+        retry = resp.headers.get("retry-after")
+        retry_after = float(retry) if retry and retry.replace(".", "", 1).isdigit() else None
+        specific = self.classify(code, detail)
+        if specific:
+            specific.retry_after = specific.retry_after or retry_after
+            raise specific
         if code == 401:
-            raise RosError(ErrorKind.INVALID_CREDENTIALS, f"OpenRouter rechazó la clave: {detail}")
+            raise RosError(ErrorKind.INVALID_CREDENTIALS, f"{name} rechazó la clave: {detail}")
         if code == 402:
-            raise RosError(ErrorKind.NO_BALANCE, f"OpenRouter: saldo insuficiente: {detail}")
+            raise RosError(ErrorKind.NO_BALANCE, f"{name}: saldo insuficiente: {detail}")
         if code == 429:
-            retry = resp.headers.get("retry-after")
-            raise RosError(ErrorKind.RATE_LIMITED, f"OpenRouter: límite de uso: {detail}",
-                           retry_after=float(retry) if retry and retry.replace(".", "", 1).isdigit() else None)
+            raise RosError(ErrorKind.RATE_LIMITED, f"{name}: límite de uso: {detail}", retry_after=retry_after)
         if code in (408, 502, 503, 504) or code >= 500:
-            raise RosError(ErrorKind.TRANSIENT, f"OpenRouter no disponible ({code}): {detail}")
-        raise RosError(ErrorKind.MODEL_ERROR, f"OpenRouter rechazó la petición ({code}): {detail}")
+            raise RosError(ErrorKind.TRANSIENT, f"{name} no disponible ({code}): {detail}")
+        raise RosError(ErrorKind.MODEL_ERROR, f"{name} rechazó la petición ({code}): {detail}")
+
+
+class OpenRouterLLM(ChatCompletionsLLM):
+    """Models on OpenRouter. Prices come from its model list (fetched once; the most expensive known
+    price is reserved if that fails) and the cost OpenRouter reports for each call is what is billed."""
+
+    provider = "OpenRouter"
+    key_hint = "la clave de OpenRouter: define OPENROUTER_API_KEY (o openrouter_api_key_env)"
+    _catalog: dict[str, dict[str, tuple[float, float]]] = {}
+
+    def __init__(self, model: str, *, api_key: str | None, base_url: str = "https://openrouter.ai/api/v1",
+                 **kw: Any):
+        super().__init__(model, api_key=api_key, base_url=base_url, **kw)
+        self.headers.update({"HTTP-Referer": "https://github.com/Fastc0de/ROSE", "X-Title": "ROS"})
+
+    def extra_body(self) -> dict[str, Any]:
+        return {"usage": {"include": True}}
+
+    # -- prices -------------------------------------------------------------
+    def price_of(self, model: str) -> tuple[float, float]:
+        catalog = self._catalog.get(self.base_url)
+        if catalog is None:
+            catalog = {}
+            try:
+                resp = self.client.get(f"{self.base_url}/models", headers=self.headers, timeout=30.0)
+                for m in resp.json().get("data", []) if resp.status_code == 200 else []:
+                    p = m.get("pricing") or {}
+                    try:
+                        catalog[m["id"]] = (float(p.get("prompt", 0)) * 1_000_000,
+                                            float(p.get("completion", 0)) * 1_000_000)
+                    except (TypeError, ValueError):
+                        continue
+            except Exception:  # noqa: BLE001 - pricing is best effort; reservations fall back to the max
+                pass
+            self._catalog[self.base_url] = catalog
+        return catalog.get(model) or price(model)
+
+
+# OpenCode Go prices (USD per million tokens, input/output), from opencode.ai/docs/go. Usage counts
+# against the plan's dollar allowances at these rates. DeepSeek uses the peak-hour rate (conservative).
+OPENCODE_PRICING: dict[str, tuple[float, float]] = {
+    "glm-5.3": (1.40, 4.40), "glm-5.3-flash": (0.15, 0.50), "glm-5.2": (1.40, 4.40),
+    "deepseek-v4.1-flash": (0.30, 1.20), "deepseek-v4-flash": (0.30, 1.20), "deepseek-v4-pro": (1.32, 3.96),
+    "kimi-k3": (3.00, 15.00), "kimi-k2.7-code": (0.95, 4.00), "kimi-k2.6": (0.95, 4.00),
+    "mimo-v2.6-flash": (0.14, 0.28), "mimo-v2.6-pro": (0.435, 0.87), "longcat-2.0": (0.30, 1.20),
+    "hy3": (0.14, 0.58), "space-bunny-free": (0.0, 0.0), "longcat-2.5-preview-free": (0.0, 0.0),
+}
+
+
+class OpenCodeLLM(ChatCompletionsLLM):
+    """OpenCode Go (or Zen) chat-completions models such as glm-5.3 or deepseek-v4.1-flash.
+
+    OpenCode asks clients to identify themselves with their own User-Agent and to send a stable
+    `x-opencode-session` per conversation: ROS uses one session per run (research or watch execution).
+    """
+
+    provider = "OpenCode"
+    key_hint = "la clave de OpenCode: define OPENCODE_API_KEY (o opencode_api_key_env)"
+
+    def __init__(self, model: str, *, api_key: str | None, base_url: str = "https://opencode.ai/zen/go/v1",
+                 **kw: Any):
+        import uuid
+        super().__init__(model, api_key=api_key, base_url=base_url, **kw)
+        self.session = f"ros-{uuid.uuid4().hex[:12]}"
+
+    def complete_json(self, **kwargs: Any) -> dict:
+        ledger = kwargs.get("ledger")
+        if ledger is not None and ledger.run_id is not None:
+            self.session = f"ros-run-{ledger.run_id}"
+        return super().complete_json(**kwargs)
+
+    def request_headers(self) -> dict[str, str]:
+        return {**self.headers, "x-opencode-session": self.session}
+
+    def price_of(self, model: str) -> tuple[float, float]:
+        return OPENCODE_PRICING.get(model) or price(model)
+
+    def classify(self, code: int, detail: str) -> RosError | None:
+        low = detail.lower()
+        if "privacy settings" in low or "requires global" in low or "missingsessionid" in low:
+            # An account setting the user must change: every further call would fail the same way.
+            return RosError(ErrorKind.INVALID_CREDENTIALS, f"OpenCode: ajuste de la cuenta necesario — {detail}")
+        if "limit" in low and ("usage" in low or "monthly" in low or "weekly" in low or "5-hour" in low):
+            return RosError(ErrorKind.RATE_LIMITED, f"OpenCode: límite de uso del plan — {detail}")
+        return None
 
 
 def parse_json_object(text: str) -> dict | None:
