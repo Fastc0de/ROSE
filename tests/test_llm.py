@@ -208,11 +208,11 @@ def test_openrouter_lenient_parsing_and_schema_fallback():
         if "response_format" in body:
             return httpx.Response(404, json={"error": {"code": 404,
                                                        "message": "No endpoints found that support response_format"}})
-        return _completion('Aquí está:\n```json\n{"title": "x", "kind": "otro", "score": "0.7"}\n```')
+        return _completion('Aquí está:\n```json\n{"title": "x", "kind": "otro", "items": "a", "score": "0.7"}\n```')
 
     llm = _openrouter(handler)
     data = llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
-    assert data == {"title": "x", "kind": "fact", "items": [], "score": 0.7}   # conformed to the schema
+    assert data == {"title": "x", "kind": "fact", "items": ["a"], "score": 0.7}   # conformed to the schema
     assert "JSON schema" in calls[1]["messages"][0]["content"]
     assert llm.price_of("spastealth/space-bunny-alpha") == max(PRICING.values())  # unknown price: conservative
 
@@ -250,3 +250,32 @@ def test_openrouter_requires_a_key():
     with pytest.raises(RosError) as info:
         OpenRouterLLM("m", api_key="")
     assert info.value.kind == ErrorKind.INVALID_CREDENTIALS
+
+
+def test_openrouter_never_guesses_missing_required_fields(db):
+    import httpx
+    answers = ['{"title": "t", "kind": "fact", "items": []}',                       # no score: retried
+               '{"title": "t", "kind": "fact", "items": [], "score": 1}']
+    bodies = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        bodies.append(json.loads(request.content))
+        return _completion(answers.pop(0))
+
+    llm = _openrouter(handler)
+    assert llm.complete_json(purpose="triage", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=None)["score"] == 1.0
+    assert "Every key in the schema is required" in bodies[1]["messages"][0]["content"]
+
+    answers[:] = ['{"title": "t"}', '{"title": "t"}']
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="triage", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=ledger)
+    assert info.value.kind == ErrorKind.MODEL_ERROR and "faltan" in info.value.message
+    row = db.one("SELECT purpose, input_tokens, cost_usd FROM usage")
+    assert row["purpose"] == "triage:failed" and row["input_tokens"] == 200 and row["cost_usd"] == pytest.approx(0.0024)

@@ -250,43 +250,64 @@ class OpenRouterLLM(LLM):
                                 "json_schema": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", purpose)[:64],
                                                 "strict": True, "schema": schema}},
         }
-        try:
-            msg = self._post(body)
-        except RosError as exc:
-            if exc.kind != ErrorKind.MODEL_ERROR or "response_format" not in exc.message.lower() \
-                    and "structured" not in exc.message.lower() and "no endpoints" not in exc.message.lower():
-                raise
-            # The model cannot do structured outputs: put the schema in the prompt instead.
-            body.pop("response_format")
-            body["messages"][0]["content"] = (system + instruction + "\nJSON schema:\n"
-                                              + json.dumps(schema, ensure_ascii=False))
-            msg = self._post(body)
-        usage = msg.get("usage") or {}
-        in_tok, out_tok = int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
-        cost = usage.get("cost")
-        cost = float(cost) if isinstance(cost, (int, float)) else None
-        served = msg.get("model") or self.model
-        choice = (msg.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        text = message.get("content") or ""
-        if isinstance(text, list):  # some providers return content parts
-            text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
-        finish = choice.get("finish_reason") or choice.get("native_finish_reason")
-        if message.get("refusal"):
-            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"model declined the {purpose} request"),
-                                in_tok, out_tok, served, cost)
-        if finish == "length":
-            raise _UsageCarrier(RosError(ErrorKind.EXTRACTION_INCOMPLETE,
-                                         f"model output for {purpose} hit max_tokens={max_tokens}"),
-                                in_tok, out_tok, served, cost)
-        if not text.strip():
-            raise _UsageCarrier(RosError(ErrorKind.EMPTY_RESPONSE, f"empty model response for {purpose}"),
-                                in_tok, out_tok, served, cost)
-        data = parse_json_object(text)
-        if data is None:
-            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"invalid JSON from model for {purpose}"),
-                                in_tok, out_tok, served, cost)
-        return conform(data, schema), in_tok, out_tok, served, cost
+        in_tok = out_tok = 0
+        cost: float | None = None
+        served = self.model
+        for attempt in range(2):
+            try:
+                msg = self._post(body)
+            except RosError as exc:
+                text = exc.message.lower()
+                if exc.kind != ErrorKind.MODEL_ERROR or "response_format" not in body or not any(
+                        k in text for k in ("response_format", "structured", "no endpoints", "json_schema")):
+                    raise
+                # The model cannot do structured outputs: put the schema in the prompt instead.
+                self._schema_in_prompt(body, system + instruction, schema, drop_format=True)
+                msg = self._post(body)
+            usage = msg.get("usage") or {}
+            in_tok += int(usage.get("prompt_tokens") or 0)
+            out_tok += int(usage.get("completion_tokens") or 0)
+            if isinstance(usage.get("cost"), (int, float)):
+                cost = (cost or 0.0) + float(usage["cost"])
+            served = msg.get("model") or self.model
+            choice = (msg.get("choices") or [{}])[0]
+            message = choice.get("message") or {}
+            text = message.get("content") or ""
+            if isinstance(text, list):  # some providers return content parts
+                text = "".join(p.get("text", "") for p in text if isinstance(p, dict))
+            finish = choice.get("finish_reason") or choice.get("native_finish_reason")
+            if message.get("refusal"):
+                raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"model declined the {purpose} request"),
+                                    in_tok, out_tok, served, cost)
+            if finish == "length":
+                raise _UsageCarrier(RosError(ErrorKind.EXTRACTION_INCOMPLETE,
+                                             f"model output for {purpose} hit max_tokens={max_tokens}"),
+                                    in_tok, out_tok, served, cost)
+            data = parse_json_object(text) if text.strip() else None
+            missing = missing_required(data, schema) if data is not None else None
+            if data is not None and not missing:
+                return conform(data, schema), in_tok, out_tok, served, cost
+            if attempt == 0:
+                # Ignored or half-followed schema: ask once more with the schema spelled out in the prompt.
+                self._schema_in_prompt(body, system + instruction, schema, drop_format=False)
+                continue
+            if not text.strip():
+                raise _UsageCarrier(RosError(ErrorKind.EMPTY_RESPONSE, f"empty model response for {purpose}"),
+                                    in_tok, out_tok, served, cost)
+            if data is None:
+                raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"invalid JSON from model for {purpose}"),
+                                    in_tok, out_tok, served, cost)
+            # Never guess a required value (e.g. a missing `relevant` silently dropping an item).
+            raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"respuesta incompleta del modelo para {purpose}: "
+                                         f"faltan {', '.join(missing)}"), in_tok, out_tok, served, cost)
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    def _schema_in_prompt(body: dict, system: str, schema: dict, *, drop_format: bool) -> None:
+        if drop_format:
+            body.pop("response_format", None)
+        body["messages"][0]["content"] = (system + "\nEvery key in the schema is required. JSON schema:\n"
+                                          + json.dumps(schema, ensure_ascii=False))
 
     def complete_json(self, **kwargs: Any) -> dict:
         return _billing_failures(self, super().complete_json, kwargs)
@@ -355,6 +376,23 @@ def parse_json_object(text: str) -> dict | None:
         if isinstance(value, dict):
             return value
     return None
+
+
+def missing_required(value: Any, schema: dict, path: str = "") -> list[str]:
+    """Required keys absent from an answer (recursively through objects and arrays of objects)."""
+    out: list[str] = []
+    if schema.get("type") == "object" and isinstance(value, dict):
+        for key in schema.get("required", []):
+            if key not in value:
+                out.append(f"{path}{key}")
+            else:
+                out += missing_required(value[key], schema["properties"].get(key, {}), f"{path}{key}.")
+    elif schema.get("type") == "array" and isinstance(value, list):
+        for v in value[:50]:
+            out += missing_required(v, schema.get("items", {}), f"{path}[].")
+    elif schema.get("type") == "object":
+        out.append(path.rstrip(".") or "(objeto)")
+    return sorted(set(out))
 
 
 def conform(value: Any, schema: dict) -> Any:
