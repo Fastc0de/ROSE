@@ -1,0 +1,17 @@
+{
+  "description": "Bounds the project-orchestrator agents: the orchestrator writes only under docs/, explorer and verifier are read-only, the implementer cannot edit specs, plans, or project memory. Does nothing for any other agent or session.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/role-guard.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

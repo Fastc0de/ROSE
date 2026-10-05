@@ -1,0 +1,9 @@
+{
+  "extraKnownMarketplaces": {
+    "rose-plugins": { "source": { "source": "github", "repo": "Fastc0de/ROSE" } }
+  },
+  "enabledPlugins": {
+    "project-memory@rose-plugins": true,
+    "project-orchestrator@rose-plugins": true
+  }
+}
