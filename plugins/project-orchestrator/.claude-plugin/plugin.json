@@ -1,0 +1,9 @@
+{
+  "name": "project-orchestrator",
+  "version": "0.2.0",
+  "description": "Conversational orchestrator for software projects: discuss ideas, write specs and plans under docs/, then delegate execution to explorer, implementer, and verifier subagents. Integrates with the project-memory plugin.",
+  "author": {
+    "name": "Alexander Bozo"
+  },
+  "keywords": ["orchestrator", "planning", "specs", "subagents", "workflow"]
+}

@@ -1,0 +1,28 @@
+{
+  "description": "Loads project status at session start, and bounds the project-archiver subagent: writes only under docs/project-memory/, no secret files, git limited to change listings. The guard does nothing outside that subagent.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/session-start.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Read|Grep|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/scripts/archiver-guard.js\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

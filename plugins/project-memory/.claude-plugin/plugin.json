@@ -1,0 +1,9 @@
+{
+  "name": "project-memory",
+  "version": "0.2.0",
+  "description": "Compact, evidence-based memory for software projects across sessions: init, load, sync, archive, and status under docs/project-memory/.",
+  "author": {
+    "name": "Alexander Bozo"
+  },
+  "keywords": ["memory", "context", "continuity", "documentation"]
+}

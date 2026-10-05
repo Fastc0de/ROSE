@@ -1,0 +1,9 @@
+{
+  "name": "rose-plugins",
+  "description": "Plugins for the ROSE project",
+  "owner": { "name": "Alexander Bozo" },
+  "plugins": [
+    { "name": "project-memory", "source": "./plugins/project-memory", "description": "Compact, evidence-based project memory under docs/project-memory/." },
+    { "name": "project-orchestrator", "source": "./plugins/project-orchestrator", "description": "Conversational orchestrator that writes specs and plans and delegates to subagents." }
+  ]
+}
