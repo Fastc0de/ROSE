@@ -325,3 +325,36 @@ def test_opencode_account_settings_error_is_fatal():
     with pytest.raises(RosError) as info:
         llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
     assert info.value.fatal and "Privacy settings" in info.value.message
+
+
+def test_deepseek_on_opencode_uses_json_object_mode():
+    import httpx
+    from ros.llm import OpenCodeLLM
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _completion('{"title": "t", "kind": "fact", "items": [], "score": 1}')
+
+    llm = OpenCodeLLM("deepseek-v4.1-flash", api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert bodies[0]["response_format"] == {"type": "json_object"}
+    assert "JSON schema" in bodies[0]["messages"][0]["content"]
+
+
+def test_reasoning_that_exhausts_tokens_under_json_schema_falls_back_to_json_object():
+    import httpx
+    answers = [_completion("", finish="length"), _completion('{"title": "t", "kind": "fact", "items": [], "score": 1}')]
+    bodies = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        bodies.append(json.loads(request.content))
+        return answers.pop(0)
+
+    llm = _openrouter(handler)
+    assert llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=None)["title"] == "t"
+    assert bodies[0]["response_format"]["type"] == "json_schema"
+    assert bodies[1]["response_format"] == {"type": "json_object"}

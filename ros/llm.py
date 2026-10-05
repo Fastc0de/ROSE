@@ -220,6 +220,10 @@ class ChatCompletionsLLM(LLM):
     def extra_body(self) -> dict[str, Any]:
         return {}
 
+    def json_mode(self) -> str:
+        """How to ask for JSON: 'json_schema' (constrained decoding) or 'json_object' (+ schema in the prompt)."""
+        return "json_schema"
+
     def request_headers(self) -> dict[str, str]:
         return self.headers
 
@@ -240,6 +244,9 @@ class ChatCompletionsLLM(LLM):
                                 "json_schema": {"name": re.sub(r"[^A-Za-z0-9_-]", "_", purpose)[:64],
                                                 "strict": True, "schema": schema}},
         }
+        if self.json_mode() == "json_object":
+            self._schema_in_prompt(body, system + instruction, schema, drop_format=True)
+            body["response_format"] = {"type": "json_object"}
         in_tok = out_tok = 0
         cost: float | None = None
         served = self.model
@@ -269,6 +276,12 @@ class ChatCompletionsLLM(LLM):
             if message.get("refusal"):
                 raise _UsageCarrier(RosError(ErrorKind.MODEL_ERROR, f"model declined the {purpose} request"),
                                     in_tok, out_tok, served, cost)
+            if finish == "length" and not text.strip() and attempt == 0 and \
+                    body.get("response_format", {}).get("type") == "json_schema":
+                # Some reasoning models never leave their thinking under constrained decoding: switch mode.
+                self._schema_in_prompt(body, system + instruction, schema, drop_format=True)
+                body["response_format"] = {"type": "json_object"}
+                continue
             if finish == "length":
                 raise _UsageCarrier(RosError(ErrorKind.EXTRACTION_INCOMPLETE,
                                              f"model output for {purpose} hit max_tokens={max_tokens}"),
@@ -431,6 +444,11 @@ class OpenCodeLLM(ChatCompletionsLLM):
 
     def price_of(self, model: str) -> tuple[float, float]:
         return OPENCODE_PRICING.get(model) or price(model)
+
+    def json_mode(self) -> str:
+        # Measured on OpenCode Go: DeepSeek reasons until max_tokens under json_schema, but answers
+        # in seconds with json_object and the schema in the prompt.
+        return "json_object" if self.model.startswith("deepseek") else "json_schema"
 
     def classify(self, code: int, detail: str) -> RosError | None:
         low = detail.lower()
