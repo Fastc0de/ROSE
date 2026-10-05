@@ -23,6 +23,10 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.0, 5.0),
 }
 FALLBACK_MODELS = {"claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1"}
+# Smallest output ceiling worth a call: below this a structured answer (plus reasoning) rarely fits.
+MIN_OUTPUT_TOKENS = 3_000
+# Models that reject `output_config.effort` with a 400.
+NO_EFFORT_MODELS = {"claude-haiku-4-5"}
 
 
 def price(model: str) -> tuple[float, float]:
@@ -62,7 +66,9 @@ class LLM:
         est_in = estimate_tokens(system) + estimate_tokens(user)
         est_cost = (est_in * in_price + max_tokens * out_price) / 1_000_000
         if ledger:
-            ledger.reserve_llm(est_in, max_tokens, est_cost)
+            # Shrink the output ceiling to what the remaining budget can pay for (never below a useful floor).
+            max_tokens, est_cost = ledger.grant_output(est_in, max_tokens, min(MIN_OUTPUT_TOKENS, max_tokens),
+                                                       in_price, out_price)
         in_tok = out_tok = 0
         served = self.model
         try:
@@ -84,16 +90,21 @@ class LLM:
 
 
 class AnthropicLLM(LLM):
-    def __init__(self, model: str = "claude-opus-5-5", effort: str = "medium", api_key: str | None = None):
+    def __init__(self, model: str = "claude-opus-5-5", effort: str = "medium", api_key: str | None = None,
+                 workspace_id: str = "", client: Any = None):
         try:
             import anthropic
         except ImportError as exc:  # pragma: no cover
             raise RosError(ErrorKind.INTERNAL, "the 'anthropic' package is not installed") from exc
         self._anthropic = anthropic
         self.model = model
-        self.effort = effort
+        self.effort = "" if model in NO_EFFORT_MODELS else effort
+        if client is not None:
+            self.client = client
+            return
+        headers = {"anthropic-workspace-id": workspace_id} if workspace_id else None
         try:
-            self.client = anthropic.Anthropic(api_key=api_key, max_retries=3)
+            self.client = anthropic.Anthropic(api_key=api_key, max_retries=3, default_headers=headers)
         except anthropic.AnthropicError as exc:
             raise RosError(ErrorKind.INVALID_CREDENTIALS,
                            "no Anthropic credentials: set ANTHROPIC_API_KEY (or run `ant auth login`)") from exc
@@ -101,6 +112,9 @@ class AnthropicLLM(LLM):
     def _call(self, *, purpose: str, system: str, user: str, schema: dict, max_tokens: int
               ) -> tuple[dict, int, int, str]:
         a = self._anthropic
+        output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
+        if self.effort:
+            output_config["effort"] = self.effort
         kwargs: dict[str, Any] = {}
         if self.model in FALLBACK_MODELS:
             # On a safety refusal the API re-runs the request on a fallback model chosen by category.
@@ -109,7 +123,7 @@ class AnthropicLLM(LLM):
             with self.client.beta.messages.stream(
                 model=self.model, max_tokens=max_tokens, system=system,
                 messages=[{"role": "user", "content": user}],
-                output_config={"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
+                output_config=output_config,
                 **kwargs,
             ) as stream:
                 msg = stream.get_final_message()
@@ -117,12 +131,15 @@ class AnthropicLLM(LLM):
             raise RosError(ErrorKind.INVALID_CREDENTIALS, f"Anthropic rejected the API key: {exc}") from exc
         except a.PermissionDeniedError as exc:
             raise RosError(ErrorKind.INVALID_CREDENTIALS, f"permission denied for model {self.model}: {exc}") from exc
-        except a.RateLimitError as exc:
-            raise RosError(ErrorKind.RATE_LIMITED, f"model rate limit: {exc}") from exc
         except a.BadRequestError as exc:
-            text = str(exc).lower()
+            text = f"{exc} {getattr(exc, 'body', '')}".lower()
+            if "workspace" in text:
+                raise RosError(ErrorKind.INVALID_CREDENTIALS, "la API key no está asociada a un workspace: "
+                               "define ANTHROPIC_WORKSPACE_ID (o anthropic_workspace_id en ros.toml)") from exc
             kind = ErrorKind.NO_BALANCE if "credit balance" in text or "billing" in text else ErrorKind.MODEL_ERROR
             raise RosError(kind, f"model request rejected: {exc}") from exc
+        except a.RateLimitError as exc:
+            raise RosError(ErrorKind.RATE_LIMITED, f"model rate limit: {exc}") from exc
         except (a.APITimeoutError, a.APIConnectionError, a.InternalServerError) as exc:
             raise RosError(ErrorKind.TRANSIENT, f"model temporarily unavailable: {exc}") from exc
         except a.APIStatusError as exc:

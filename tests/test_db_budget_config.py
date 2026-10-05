@@ -137,7 +137,8 @@ def test_elapsed_time_survives_restart(db, monkeypatch):
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ROS_HOME", str(tmp_path / ".ros"))
-    for var in ("ROS_DB", "ROS_MODEL", "ROS_LLM", "ROS_SEARCH", "ROS_EFFORT"):
+    for var in ("ROS_DB", "ROS_LLM", "ROS_SEARCH", "ROS_ORCHESTRATOR_MODEL", "ROS_WORKER_MODEL",
+                "ANTHROPIC_WORKSPACE_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -145,14 +146,16 @@ def isolated(tmp_path, monkeypatch):
 
 def test_config_precedence(isolated, monkeypatch):
     (isolated / ".config" / "ros").mkdir(parents=True)
-    (isolated / ".config" / "ros" / "config.toml").write_text('model = "global"\neffort = "low"\n')
-    (isolated / "ros.toml").write_text('model = "project"\n[budget]\nmax_rounds = 7\n')
+    (isolated / ".config" / "ros" / "config.toml").write_text('orchestrator_model = "global"\nvalidator_effort = "low"\n')
+    (isolated / "ros.toml").write_text('orchestrator_model = "project"\n[budget]\nmax_rounds = 7\n')
     explicit = isolated / "explicit.toml"
-    explicit.write_text('model = "explicit"\nsearch_backend = "brave"\n')
+    explicit.write_text('orchestrator_model = "explicit"\nsearch_backend = "brave"\n')
     monkeypatch.setenv("ROS_SEARCH", "searxng")
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_123")
     s = load_settings(str(explicit), {"budget": {"max_sources": 3}})
-    assert s.effort == "low"                 # user-global file
-    assert s.model == "explicit"             # --config beats ./ros.toml
+    assert s.validator_effort == "low"                # user-global file
+    assert s.orchestrator_model == "explicit"         # --config beats ./ros.toml
+    assert s.anthropic_workspace_id == "wrkspc_123"
     assert s.search_backend == "searxng"     # environment beats files
     assert s.budget.max_rounds == 7 and s.budget.max_sources == 3   # budgets merge field by field
     assert s.db_path == str(isolated / ".ros" / "ros.db")
@@ -167,3 +170,12 @@ def test_config_rejects_unknown_keys(isolated):
 def test_missing_explicit_config_fails(isolated):
     with pytest.raises(FileNotFoundError):
         load_settings("nope.toml")
+
+
+def test_default_model_roles(isolated):
+    s = load_settings()
+    assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
+    assert s.role("validator") == ("claude-sonnet-5-5", "medium")
+    assert s.role("worker") == ("claude-haiku-4-5", "")
+    with pytest.raises(ValueError):
+        s.role("boss")

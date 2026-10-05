@@ -26,10 +26,19 @@ def test_fake_llm_usage_is_recorded(ledger):
     assert totals.llm_calls == 1 and totals.input_tokens > 0 and totals.cost_usd > 0
 
 
-def test_call_is_not_made_when_budget_cannot_cover_worst_case(ledger):
-    llm = FakeLLM(lambda *a: {"ok": True})
+def test_output_ceiling_shrinks_to_what_the_budget_can_pay(ledger):
+    calls = []
+    llm = _claude(_message(), calls)        # Opus: $20 per million output tokens
+    ledger.budget.max_cost_usd = 0.10      # pays for ~5,000 output tokens, not the 12,000 requested
+    llm.complete_json(purpose="plan", system="s", user="u", schema=SCHEMA, max_tokens=12_000, ledger=ledger)
+    assert 3_000 <= calls[0]["max_tokens"] < 5_000
+
+
+def test_call_is_not_made_when_budget_cannot_cover_a_useful_answer(ledger):
+    llm = FakeLLM(lambda *a: {"ok": True})  # Haiku: $5 per million output tokens
+    ledger.budget.max_cost_usd = 0.01      # ~2,000 output tokens: below the useful floor
     with pytest.raises(BudgetExhausted):
-        llm.complete_json(purpose="t", system="s", user="u", schema=SCHEMA, max_tokens=200_000, ledger=ledger)
+        llm.complete_json(purpose="t", system="s", user="u", schema=SCHEMA, max_tokens=12_000, ledger=ledger)
     assert llm.calls == []
 
 
@@ -54,8 +63,8 @@ def _message(text='{"ok": true}', stop_reason="end_turn", model="claude-opus-5-5
     return SimpleNamespace(usage=usage, stop_reason=stop_reason, content=content, model=model)
 
 
-def _claude(message, calls):
-    llm = AnthropicLLM(model="claude-opus-5-5", effort="medium", api_key="test-key")
+def _claude(message, calls, model="claude-opus-5-5", effort="medium"):
+    llm = AnthropicLLM(model=model, effort=effort, api_key="test-key")
 
     def stream(**kwargs):
         calls.append(kwargs)
@@ -98,3 +107,37 @@ def test_failed_calls_raise_typed_errors_and_still_bill(ledger, stop_reason, tex
     assert info.value.kind == kind
     row = ledger.db.one("SELECT purpose, output_tokens FROM usage WHERE kind='llm'")
     assert row["purpose"] == "extract:failed" and row["output_tokens"] == 500
+
+
+def test_haiku_gets_no_effort_and_no_fallbacks(ledger):
+    calls = []
+    llm = _claude(_message(model="claude-haiku-4-5"), calls, model="claude-haiku-4-5", effort="high")
+    llm.complete_json(purpose="extract", system="s", user="u", schema=SCHEMA, max_tokens=8000, ledger=ledger)
+    assert calls[0]["output_config"] == {"format": {"type": "json_schema", "schema": SCHEMA}}
+    assert "fallbacks" not in calls[0] and "betas" not in calls[0]
+
+
+def test_workspace_header_is_sent():
+    llm = AnthropicLLM(model="claude-sonnet-5-5", api_key="test-key", workspace_id="wrkspc_123")
+    assert llm.client.default_headers["anthropic-workspace-id"] == "wrkspc_123"
+    shared = AnthropicLLM(model="claude-haiku-4-5", client=llm.client)
+    assert shared.client is llm.client
+
+
+def test_missing_workspace_is_reported_clearly(ledger):
+    import anthropic
+    import httpx2
+
+    llm = AnthropicLLM(model="claude-opus-5-5", api_key="test-key")
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    body = {"type": "error", "error": {"type": "invalid_request_error",
+                                       "message": "This API key is not scoped to a workspace"}}
+    error = anthropic.BadRequestError("bad", response=httpx2.Response(400, request=request, json=body), body=body)
+
+    def stream(**kwargs):
+        raise error
+
+    llm.client = SimpleNamespace(beta=SimpleNamespace(messages=SimpleNamespace(stream=stream)))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="plan", system="s", user="u", schema=SCHEMA, max_tokens=100, ledger=ledger)
+    assert info.value.kind == ErrorKind.INVALID_CREDENTIALS and "ANTHROPIC_WORKSPACE_ID" in info.value.message

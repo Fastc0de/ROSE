@@ -23,8 +23,12 @@ def _cite(text: str) -> str:
     return re.sub(r"\[C(\d+)\]", r"[C\1](#c\1)", text)
 
 
+SUPPORT = {"partial": "⚠ respaldo parcial según el validador", "no": "✖ no respaldada según el validador"}
+OVERALL = {"ok": "✅ sin problemas", "minor_issues": "⚠ problemas menores", "major_issues": "✖ problemas importantes"}
+
+
 def render_report(db: Database, run_id: int, *, synthesis: dict | None, stop_reason: str, degraded: list[str],
-                  status: str, usage: dict) -> str:
+                  status: str, usage: dict, validation: dict | None = None) -> str:
     run = db.one("SELECT * FROM runs WHERE id=?", (run_id,))
     plan = loads(run["plan_json"], {}) or {}
     out: list[str] = []
@@ -50,9 +54,13 @@ def render_report(db: Database, run_id: int, *, synthesis: dict | None, stop_rea
             out.append(_cite(sec["body"]) + "\n")
         if synthesis["conclusions"]:
             out.append("## Conclusiones\n")
-            for c in synthesis["conclusions"]:
+            checks = {v["index"]: v for v in (validation or {}).get("conclusions", [])}
+            for k, c in enumerate(synthesis["conclusions"]):
                 refs = " ".join(f"[C{i}](#c{i})" for i in c["claim_ids"])
                 out.append(f"- **({CONF.get(c['confidence'], c['confidence'])})** {_cite(c['text'])} {refs}")
+                check = checks.get(k)
+                if check and check["supported"] in SUPPORT:
+                    out.append(f"  - _{SUPPORT[check['supported']]}: {check['issue']}_")
             out.append("")
     else:
         out.append("## Hallazgos\n")
@@ -85,6 +93,14 @@ def render_report(db: Database, run_id: int, *, synthesis: dict | None, stop_rea
                 out.append(f"## {heading}\n")
                 out.extend(f"- {_cite(x)}" for x in synthesis[key])
                 out.append("")
+    if synthesis:
+        out.append("## Validación\n")
+        if validation:
+            out.append(f"**Resultado:** {OVERALL.get(validation['overall'], validation['overall'])}. {validation['note']}\n")
+            out.extend(f"- _{i['location']}_: {i['problem']}" for i in validation["issues"])
+        else:
+            out.append("_El informe no pudo validarse contra la evidencia (ver errores)._")
+        out.append("")
     gaps = [f for f in findings if f["kind"] == "gap"]
     if gaps and not synthesis:
         out.append("## Vacíos de información\n")

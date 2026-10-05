@@ -99,7 +99,11 @@ def synthesize(user: str) -> dict:
     }
 
 
-HANDLERS = {"plan": plan, "extract": extract, "analyze": analyze, "synthesize": synthesize}
+def validate(user: str) -> dict:
+    return {"conclusions": [], "issues": [], "overall": "ok", "note": "modo offline: validación no realizada"}
+
+
+HANDLERS = {"plan": plan, "extract": extract, "analyze": analyze, "synthesize": synthesize, "validate": validate}
 
 
 def offline_handler(purpose: str, system: str, user: str, schema: dict) -> dict:

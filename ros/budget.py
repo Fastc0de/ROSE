@@ -136,6 +136,32 @@ class Ledger:
             self._reserved_tokens += est_input_tokens + max_output_tokens
             self._reserved_cost += est_cost
 
+    def grant_output(self, est_input_tokens: int, max_output_tokens: int, min_output_tokens: int,
+                     in_price: float, out_price: float) -> tuple[int, float]:
+        """Reserve the largest output ceiling (<= max) that every cap can still pay for.
+
+        The ceiling is sent to the model as max_tokens, so the reservation stays a true worst case.
+        Raises BudgetExhausted when even `min_output_tokens` no longer fits.
+        Returns (granted_output_tokens, reserved_cost).
+        """
+        self.check_time()
+        cost_cap, token_cap = self._caps()
+        with self._lock:
+            t = self.totals()
+            input_cost = est_input_tokens * in_price / 1_000_000
+            free_tokens = token_cap - t.tokens - self._reserved_tokens - est_input_tokens
+            free_cost = cost_cap - t.cost_usd - self._reserved_cost - input_cost
+            by_cost = int(free_cost * 1_000_000 / out_price) if out_price else max_output_tokens
+            granted = min(max_output_tokens, free_tokens, by_cost)
+            if granted < min_output_tokens:
+                if free_tokens <= by_cost:
+                    raise BudgetExhausted("tokens", f"límite de tokens alcanzado ({t.tokens}/{self.budget.max_tokens})")
+                raise BudgetExhausted("cost", f"límite de coste alcanzado (${t.cost_usd:.4f}/${self.budget.max_cost_usd:.2f})")
+            cost = input_cost + granted * out_price / 1_000_000
+            self._reserved_tokens += est_input_tokens + granted
+            self._reserved_cost += cost
+            return granted, cost
+
     def settle_llm(self, est_input_tokens: int, max_output_tokens: int, est_cost: float, *, purpose: str,
                    model: str, input_tokens: int, output_tokens: int, cost: float) -> None:
         with self._lock:

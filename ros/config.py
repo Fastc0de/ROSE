@@ -24,8 +24,15 @@ def ros_home() -> Path:
 class Settings:
     db_path: str = ""
     reports_dir: str = ""
-    model: str = "claude-opus-5-5"
-    effort: str = "medium"
+    # Model per role. Orchestrator: plans, analyses rounds and writes the report. Validator: checks
+    # the report against its evidence. Worker: high-volume extraction. Empty effort = not sent.
+    orchestrator_model: str = "claude-opus-5-5"
+    orchestrator_effort: str = "medium"
+    validator_model: str = "claude-sonnet-5-5"
+    validator_effort: str = "medium"
+    worker_model: str = "claude-haiku-4-5"
+    worker_effort: str = ""                 # Claude Haiku 4.5 does not accept an effort level
+    anthropic_workspace_id: str = ""        # needed when the API key is not scoped to a workspace
     llm: str = "anthropic"                  # anthropic | fake (offline demo, no real analysis)
     search_backend: str = "duckduckgo"      # duckduckgo | brave | searxng
     searxng_url: str = "http://localhost:8888"
@@ -35,15 +42,25 @@ class Settings:
     exclude_domains: tuple[str, ...] = ()
     budget: Budget = field(default_factory=Budget)
 
+    def role(self, name: str) -> tuple[str, str]:
+        """(model, effort) for a role: orchestrator | validator | worker."""
+        if name not in ROLES:
+            raise ValueError(f"unknown model role {name!r}")
+        return getattr(self, f"{name}_model"), getattr(self, f"{name}_effort")
+
     def redacted(self) -> dict[str, Any]:
         data = asdict(self)
         data["exclude_domains"] = list(self.exclude_domains)
         return data
 
 
+ROLES = ("orchestrator", "validator", "worker")
+
 ENV_MAP = {
-    "ROS_DB": "db_path", "ROS_REPORTS_DIR": "reports_dir", "ROS_MODEL": "model", "ROS_EFFORT": "effort",
-    "ROS_LLM": "llm", "ROS_SEARCH": "search_backend", "ROS_SEARXNG_URL": "searxng_url",
+    "ROS_DB": "db_path", "ROS_REPORTS_DIR": "reports_dir", "ROS_LLM": "llm", "ROS_SEARCH": "search_backend",
+    "ROS_SEARXNG_URL": "searxng_url", "ANTHROPIC_WORKSPACE_ID": "anthropic_workspace_id",
+    **{f"ROS_{r.upper()}_MODEL": f"{r}_model" for r in ROLES},
+    **{f"ROS_{r.upper()}_EFFORT": f"{r}_effort" for r in ROLES},
 }
 
 

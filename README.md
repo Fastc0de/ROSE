@@ -27,7 +27,19 @@ Plan completo en [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Requisitos
 
-Python 3.11+ y [uv](https://docs.astral.sh/uv/). Para el análisis hace falta `ANTHROPIC_API_KEY`.
+Python 3.11+ y [uv](https://docs.astral.sh/uv/). Para el análisis hace falta `ANTHROPIC_API_KEY`
+(y `ANTHROPIC_WORKSPACE_ID` si tu clave no está asociada a un workspace).
+
+### Modelos por rol
+
+| Rol | Modelo por defecto | Esfuerzo | Etapas |
+|---|---|---|---|
+| Orquestador | `claude-opus-5-5` | `medium` | plan, análisis de cada ronda, informe final |
+| Validador | `claude-sonnet-5-5` | `medium` | revisa que cada conclusión del informe esté respaldada por su evidencia |
+| Worker | `claude-haiku-4-5` | — | extracción de afirmaciones de cada documento |
+
+Se cambian en `ros.toml` (`orchestrator_model`, `validator_effort`, `worker_model`…) o con variables
+`ROS_ORCHESTRATOR_MODEL`, `ROS_VALIDATOR_EFFORT`, etc.
 
 ```bash
 uv sync

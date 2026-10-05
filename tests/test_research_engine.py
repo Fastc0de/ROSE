@@ -64,8 +64,14 @@ def scripted_model(purpose, system, user, schema):
                 "coverage": 0.5 if first else 0.9, "should_stop": not first, "stop_reason": "suficiente"}
     if purpose == "synthesize":
         return {"title": "Baterías de sodio", "executive_summary": "Resumen [C1].", "sections": [],
-                "conclusions": [{"text": "Son viables", "confidence": "medium", "claim_ids": [1]}],
+                "conclusions": [{"text": "Son viables", "confidence": "medium", "claim_ids": [1]},
+                                {"text": "Son más baratas que el litio", "confidence": "high", "claim_ids": [2]}],
                 "uncertainties": [], "open_questions": [], "next_steps": []}
+    if purpose == "validate":
+        return {"conclusions": [{"index": 0, "supported": "yes", "issue": ""},
+                                {"index": 1, "supported": "no", "issue": "C2 no habla de precios"}],
+                "issues": [{"location": "Resumen", "problem": "afirmación sin cita"}],
+                "overall": "major_issues", "note": "Revisar la conclusión 2."}
     raise AssertionError(purpose)
 
 
@@ -84,22 +90,25 @@ def test_adaptive_multi_round_research(make_app, site, db):
     assert len(versions) >= 2 and "¿Cuánto cuesta fabricarlas?" in versions[1]["reason"]
 
     # Round-2 analysis sees round-1 evidence.
-    analyze_prompts = [u for p, u in app.llm.calls if p == "analyze"]
+    analyze_prompts = [u for p, u in app.llm('orchestrator').calls if p == "analyze"]
     assert f"afirmación de {A}" in analyze_prompts[1] and f"afirmación de {C}" in analyze_prompts[1]
 
     items = {r["url"]: r for r in db.all("SELECT url, status, reason FROM run_items WHERE run_id=?", (run_id,))}
     assert items[EVIL]["status"] == "rejected" and site.hits(EVIL) == 0
     assert items[DUP]["status"] == "irrelevant" and "duplicado" in items[DUP]["reason"]
-    extracted_urls = [re.search(r"URL: (\S+)", u).group(1) for p, u in app.llm.calls if p == "extract"]
+    extracted_urls = [re.search(r"URL: (\S+)", u).group(1) for p, u in app.llm('orchestrator').calls if p == "extract"]
     assert DUP not in extracted_urls and A in extracted_urls      # duplicate content is never sent to the model
 
     assert db.one("SELECT COUNT(*) c FROM run_log WHERE run_id=? AND kind='injection'", (run_id,))["c"] == 1
-    inj_prompt = next(u for p, u in app.llm.calls if p == "extract" and INJ in u)
+    inj_prompt = next(u for p, u in app.llm('orchestrator').calls if p == "extract" and INJ in u)
     assert re.search(r"<external_content[^>]*>.*Ignore previous instructions.*</external_content>", inj_prompt, re.S)
 
     report = db.one("SELECT report_md FROM runs WHERE id=?", (run_id,))["report_md"]
-    for expected in ("# Baterías de sodio", "## Evidencia", A, "Descubrimientos", "verificado", "## Consumo"):
+    for expected in ("# Baterías de sodio", "## Evidencia", A, "Descubrimientos", "verificado", "## Consumo",
+                     "## Validación", "problemas importantes", "no respaldada según el validador: C2 no habla de precios"):
         assert expected in report
+    validate_prompt = next(u for p, u in app.llm("validator").calls if p == "validate")
+    assert "Son más baratas que el litio" in validate_prompt and "C2 [fact" in validate_prompt
 
 
 def test_interrupted_run_resumes_without_repeating_work(make_app, site, db):
@@ -117,18 +126,18 @@ def test_interrupted_run_resumes_without_repeating_work(make_app, site, db):
     with pytest.raises(KeyboardInterrupt):
         engine.run(run_id)
     assert db.one("SELECT status FROM runs WHERE id=?", (run_id,))["status"] == "paused"
-    extracted_before = sum(1 for p, _ in app.llm.calls if p == "extract")
+    extracted_before = sum(1 for p, _ in app.llm('orchestrator').calls if p == "extract")
 
     assert ResearchEngine(app).run(run_id) == "completed"
     assert search.queries.count("baterías de sodio") == 1          # not searched again
     assert site.hits(A) == 1                                       # not downloaded again
-    extract_urls = [re.search(r"URL: (\S+)", u).group(1) for p, u in app.llm.calls if p == "extract"]
+    extract_urls = [re.search(r"URL: (\S+)", u).group(1) for p, u in app.llm('orchestrator').calls if p == "extract"]
     assert len(extract_urls) == len(set(extract_urls))             # no document analysed twice
     assert extracted_before == 3                                   # A, B and EVIL (not excluded here); DUP skipped
 
 
 def test_budget_exhaustion_keeps_progress_and_reports_partial(make_app, site, db, monkeypatch):
-    original = Ledger.reserve_llm
+    original = Ledger.grant_output
     calls = {"n": 0}
 
     def limited(self, *args):
@@ -137,7 +146,7 @@ def test_budget_exhaustion_keeps_progress_and_reports_partial(make_app, site, db
             raise BudgetExhausted("cost", "límite de coste alcanzado")
         return original(self, *args)
 
-    monkeypatch.setattr(Ledger, "reserve_llm", limited)
+    monkeypatch.setattr(Ledger, "grant_output", limited)
     app = make_app(scripted_model, search_engine())
     engine = ResearchEngine(app)
     run_id = engine.create("baterías de sodio")
@@ -149,6 +158,16 @@ def test_budget_exhaustion_keeps_progress_and_reports_partial(make_app, site, db
     assert db.one("SELECT COUNT(*) c FROM errors WHERE run_id=? AND kind='budget_exhausted'", (run_id,))["c"] == 1
     report = db.one("SELECT report_md FROM runs WHERE id=?", (run_id,))["report_md"]
     assert "límite de cost" in report and "NO debe considerarse completo" in report
+
+
+def test_small_budget_still_plans_and_reports(make_app, site, db):
+    app = make_app(scripted_model, search_engine())
+    app.llm("orchestrator").model = "claude-opus-5-5"     # bill at Opus prices
+    engine = ResearchEngine(app)
+    run_id = engine.create("baterías de sodio", Budget(max_cost_usd=0.30, max_rounds=1))
+    assert engine.run(run_id) in ("completed", "partial")
+    assert db.one("SELECT COUNT(*) c FROM claims WHERE run_id=?", (run_id,))["c"] > 0
+    assert db.one("SELECT SUM(cost_usd) c FROM usage WHERE run_id=?", (run_id,))["c"] <= 0.30
 
 
 def test_source_cap_is_respected(make_app, site, db):
@@ -171,3 +190,21 @@ def test_cli_offline_research_writes_report(site, fetcher, tmp_path, monkeypatch
     assert code == 0
     report = out.read_text()
     assert "Informe (offline)" in report and A in report
+
+
+def test_each_stage_uses_its_role_model(site, fetcher, db, settings):
+    from ros.llm import FakeLLM
+
+    models = {"orchestrator": FakeLLM(scripted_model, model="claude-opus-5-5"),
+              "validator": FakeLLM(scripted_model, model="claude-sonnet-5-5"),
+              "worker": FakeLLM(scripted_model, model="claude-haiku-4-5")}
+    app = build_app(settings, search=search_engine(), fetcher=fetcher, db=db)
+    app._llms.update(models)
+    engine = ResearchEngine(app)
+    run_id = engine.create("baterías de sodio", exclude_domains=("evil.example",))
+    assert engine.run(run_id) == "completed"
+    stages = {role: {p for p, _ in llm.calls} for role, llm in models.items()}
+    assert stages == {"orchestrator": {"plan", "analyze", "synthesize"}, "validator": {"validate"},
+                      "worker": {"extract"}}
+    billed = {r["model"] for r in db.all("SELECT DISTINCT model FROM usage WHERE kind='llm'")}
+    assert billed == {"claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-4-5"}
