@@ -21,10 +21,11 @@ Los tests (sin red ni API keys) cubren los 14 criterios de aceptación de `specs
 
 ## Instalación
 
-Python 3.11+ y [uv](https://docs.astral.sh/uv/). Para el análisis hace falta `ANTHROPIC_API_KEY`
-(y `ANTHROPIC_WORKSPACE_ID` si tu clave no está asociada a un workspace).
+Python 3.11+ y [uv](https://docs.astral.sh/uv/). Para el análisis hace falta la clave del proveedor de modelos.
+Por defecto ROS usa [OpenRouter](https://openrouter.ai) con el modelo `spastealth/space-bunny-alpha` para todo:
 
 ```bash
+export OPENROUTER_API_KEY="sk-or-…"     # nunca en ros.toml ni en el repositorio
 uv sync
 uv run pytest                    # tests, sin red
 uv run ros --help
@@ -108,16 +109,22 @@ ros obsidian ~/Vault             # exportar informes y digestos
 configuración global > valores por defecto. Los secretos nunca se escriben en el archivo: solo el nombre de la
 variable de entorno que los contiene.
 
-### Modelos por rol
+### Proveedor y modelos por rol
 
-| Rol | Modelo por defecto | Esfuerzo | Etapas |
-|---|---|---|---|
-| Orquestador | `claude-opus-5-5` | `medium` | plan, análisis de cada ronda, informe final, correlación, digestos, configuración en lenguaje natural |
-| Validador | `claude-sonnet-5-5` | `medium` | revisa que cada conclusión del informe esté respaldada por su evidencia |
-| Worker | `claude-haiku-4-5` | — | extracción de afirmaciones y triaje de cada item de los seguimientos |
+| `llm` | Clave | Modelos por defecto |
+|---|---|---|
+| `openrouter` (por defecto) | `OPENROUTER_API_KEY` | `openrouter_model` (`spastealth/space-bunny-alpha`) para los tres roles |
+| `anthropic` | `ANTHROPIC_API_KEY` (+ `ANTHROPIC_WORKSPACE_ID` si hace falta) | orquestador `claude-opus-5-5`, validador `claude-sonnet-5-5`, worker `claude-haiku-4-5` |
+| `fake` | — | modelo determinista sin coste (`--offline`) |
 
-Se cambian en `ros.toml` (`orchestrator_model`, `validator_effort`, `worker_model`…) o con variables
-`ROS_ORCHESTRATOR_MODEL`, `ROS_VALIDATOR_EFFORT`, etc.
+Roles: el **orquestador** planifica, analiza cada ronda, redacta informes, correlaciona y genera digestos; el
+**validador** revisa que cada conclusión esté respaldada; el **worker** extrae afirmaciones y hace el triaje de
+cada item de los seguimientos. Para usar un modelo distinto en un rol: `worker_model = "…"` en `ros.toml` o
+`ROS_WORKER_MODEL=…`; para cambiar el de todos en OpenRouter: `openrouter_model` o `ROS_OPENROUTER_MODEL`.
+
+Con OpenRouter, ROS pide salida JSON con esquema; si el modelo no la admite, envía el esquema en el prompt y
+normaliza la respuesta. El precio se toma de la lista de modelos de OpenRouter y se factura el coste que
+OpenRouter informa en cada llamada; si no se puede consultar, se reserva el precio más alto conocido.
 
 ### Conectores con credenciales
 

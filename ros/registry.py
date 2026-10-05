@@ -13,7 +13,7 @@ from .connectors.native import (FacebookConnector, InstagramConnector, RedditAPI
 from .connectors.search import BraveBackend, DuckDuckGoBackend, SearchWatchConnector, SearxngBackend
 from .db import Database
 from .errors import ErrorKind, RosError
-from .llm import LLM, AnthropicLLM, FakeLLM
+from .llm import LLM, AnthropicLLM, FakeLLM, OpenRouterLLM
 from .security import SafeFetcher
 
 
@@ -58,6 +58,10 @@ def build_llm(settings: Settings, role: str, shared: LLM | None = None) -> LLM:
     if settings.llm == "anthropic":
         client = shared.client if isinstance(shared, AnthropicLLM) else None
         return AnthropicLLM(model=model, effort=effort, workspace_id=settings.anthropic_workspace_id, client=client)
+    if settings.llm == "openrouter":
+        client = shared.client if isinstance(shared, OpenRouterLLM) else None
+        return OpenRouterLLM(model, api_key=os.environ.get(settings.openrouter_api_key_env),
+                             base_url=settings.openrouter_base_url, client=client)
     if settings.llm == "fake":
         from .offline import offline_handler
         return FakeLLM(offline_handler)

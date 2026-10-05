@@ -25,15 +25,19 @@ class Settings:
     db_path: str = ""
     reports_dir: str = ""
     # Model per role. Orchestrator: plans, analyses rounds and writes the report. Validator: checks
-    # the report against its evidence. Worker: high-volume extraction. Empty effort = not sent.
-    orchestrator_model: str = "claude-opus-5-5"
-    orchestrator_effort: str = "medium"
-    validator_model: str = "claude-sonnet-5-5"
-    validator_effort: str = "medium"
-    worker_model: str = "claude-haiku-4-5"
-    worker_effort: str = ""                 # Claude Haiku 4.5 does not accept an effort level
+    # the report against its evidence. Worker: high-volume extraction. Empty = the provider's default
+    # for that role (see PROVIDER_DEFAULTS); an empty effort is not sent.
+    orchestrator_model: str = ""
+    orchestrator_effort: str = ""
+    validator_model: str = ""
+    validator_effort: str = ""
+    worker_model: str = ""
+    worker_effort: str = ""
     anthropic_workspace_id: str = ""        # needed when the API key is not scoped to a workspace
-    llm: str = "anthropic"                  # anthropic | fake (offline demo, no real analysis)
+    llm: str = "openrouter"                 # openrouter | anthropic | fake (offline demo, no real analysis)
+    openrouter_model: str = "spastealth/space-bunny-alpha"   # default model for every role on OpenRouter
+    openrouter_api_key_env: str = "OPENROUTER_API_KEY"
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
     search_backend: str = "duckduckgo"      # duckduckgo | brave | searxng
     searxng_url: str = "http://localhost:8888"
     brave_api_key_env: str = "BRAVE_API_KEY"
@@ -73,7 +77,11 @@ class Settings:
         """(model, effort) for a role: orchestrator | validator | worker."""
         if name not in ROLES:
             raise ValueError(f"unknown model role {name!r}")
-        return getattr(self, f"{name}_model"), getattr(self, f"{name}_effort")
+        if self.llm == "openrouter":
+            default = (self.openrouter_model, "")
+        else:
+            default = PROVIDER_DEFAULTS["anthropic"][name]
+        return (getattr(self, f"{name}_model") or default[0], getattr(self, f"{name}_effort") or default[1])
 
     def redacted(self) -> dict[str, Any]:
         data = asdict(self)
@@ -84,10 +92,17 @@ class Settings:
 
 ROLES = ("orchestrator", "validator", "worker")
 
+# Per-role defaults when the role's model is not configured. On OpenRouter every role uses
+# `openrouter_model` unless a role model is set explicitly.
+PROVIDER_DEFAULTS = {
+    "anthropic": {"orchestrator": ("claude-opus-5-5", "medium"), "validator": ("claude-sonnet-5-5", "medium"),
+                  "worker": ("claude-haiku-4-5", "")},   # Claude Haiku 4.5 does not accept an effort level
+}
+
 ENV_MAP = {
     "ROS_DB": "db_path", "ROS_REPORTS_DIR": "reports_dir", "ROS_LLM": "llm", "ROS_SEARCH": "search_backend",
     "ROS_SEARXNG_URL": "searxng_url", "ANTHROPIC_WORKSPACE_ID": "anthropic_workspace_id",
-    "ROS_TIMEZONE": "timezone", "ROS_OBSIDIAN_VAULT": "obsidian_vault",
+    "ROS_TIMEZONE": "timezone", "ROS_OBSIDIAN_VAULT": "obsidian_vault", "ROS_OPENROUTER_MODEL": "openrouter_model",
     **{f"ROS_{r.upper()}_MODEL": f"{r}_model" for r in ROLES},
     **{f"ROS_{r.upper()}_EFFORT": f"{r}_effort" for r in ROLES},
 }

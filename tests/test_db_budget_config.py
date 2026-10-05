@@ -138,7 +138,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ROS_HOME", str(tmp_path / ".ros"))
     for var in ("ROS_DB", "ROS_LLM", "ROS_SEARCH", "ROS_ORCHESTRATOR_MODEL", "ROS_WORKER_MODEL",
-                "ANTHROPIC_WORKSPACE_ID"):
+                "ANTHROPIC_WORKSPACE_ID", "ROS_OPENROUTER_MODEL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -174,8 +174,20 @@ def test_missing_explicit_config_fails(isolated):
 
 def test_default_model_roles(isolated):
     s = load_settings()
-    assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
-    assert s.role("validator") == ("claude-sonnet-5-5", "medium")
-    assert s.role("worker") == ("claude-haiku-4-5", "")
+    assert s.llm == "openrouter"
+    for role in ("orchestrator", "validator", "worker"):
+        assert s.role(role) == ("spastealth/space-bunny-alpha", "")
     with pytest.raises(ValueError):
         s.role("boss")
+
+
+def test_role_models_per_provider(isolated, monkeypatch):
+    (isolated / "ros.toml").write_text('worker_model = "openai/gpt-x"\n')
+    s = load_settings()
+    assert s.role("worker") == ("openai/gpt-x", "") and s.role("validator")[0] == "spastealth/space-bunny-alpha"
+    monkeypatch.setenv("ROS_LLM", "anthropic")
+    monkeypatch.setenv("ROS_OPENROUTER_MODEL", "ignored/when-anthropic")
+    s = load_settings()
+    assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
+    assert s.role("validator") == ("claude-sonnet-5-5", "medium")
+    assert s.role("worker") == ("openai/gpt-x", "")

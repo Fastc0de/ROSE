@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from ros.budget import Budget, Ledger
 from ros.db import now_iso
 from ros.errors import BudgetExhausted, ErrorKind, RosError
-from ros.llm import AnthropicLLM, FakeLLM, price
+from ros.llm import PRICING, AnthropicLLM, FakeLLM, price
 
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
           "additionalProperties": False}
@@ -141,3 +142,111 @@ def test_missing_workspace_is_reported_clearly(ledger):
     with pytest.raises(RosError) as info:
         llm.complete_json(purpose="plan", system="s", user="u", schema=SCHEMA, max_tokens=100, ledger=ledger)
     assert info.value.kind == ErrorKind.INVALID_CREDENTIALS and "ANTHROPIC_WORKSPACE_ID" in info.value.message
+
+
+# -- OpenRouter -----------------------------------------------------------
+
+def _openrouter(handler, **kw):
+    import httpx
+
+    from ros.llm import OpenRouterLLM
+    OpenRouterLLM._catalog.clear()
+    return OpenRouterLLM("spastealth/space-bunny-alpha", api_key="sk-or-test",
+                         client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None, **kw)
+
+
+OR_SCHEMA = {"type": "object", "properties": {"title": {"type": "string"},
+                                            "kind": {"type": "string", "enum": ["fact", "rumor"]},
+                                            "items": {"type": "array", "items": {"type": "string"}},
+                                            "score": {"type": "number"}},
+          "required": ["title", "kind", "items", "score"], "additionalProperties": False}
+
+
+def _completion(content, usage=None, finish="stop"):
+    import httpx
+    return httpx.Response(200, json={"model": "spastealth/space-bunny-alpha",
+                                     "choices": [{"message": {"content": content}, "finish_reason": finish}],
+                                     "usage": usage or {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.0012}})
+
+
+def test_openrouter_structured_call_bills_reported_cost(db):
+    import httpx
+    sent = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "spastealth/space-bunny-alpha",
+                                                       "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]})
+        sent.append(json.loads(request.content))
+        return _completion('{"title": "t", "kind": "fact", "items": ["a"], "score": 0.5}')
+
+    llm = _openrouter(handler)
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    data = llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=ledger)
+    assert data == {"title": "t", "kind": "fact", "items": ["a"], "score": 0.5}
+    body = sent[0]
+    assert body["model"] == "spastealth/space-bunny-alpha" and body["max_tokens"] == 4000
+    assert body["response_format"]["json_schema"]["schema"] == OR_SCHEMA and body["usage"] == {"include": True}
+    assert llm.price_of("spastealth/space-bunny-alpha") == pytest.approx((1.0, 2.0))
+    row = db.one("SELECT model, input_tokens, output_tokens, cost_usd FROM usage")
+    assert (row["model"], row["input_tokens"], row["output_tokens"]) == ("spastealth/space-bunny-alpha", 100, 20)
+    assert row["cost_usd"] == pytest.approx(0.0012)
+
+
+def test_openrouter_lenient_parsing_and_schema_fallback():
+    import httpx
+    calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        body = json.loads(request.content)
+        calls.append(body)
+        if "response_format" in body:
+            return httpx.Response(404, json={"error": {"code": 404,
+                                                       "message": "No endpoints found that support response_format"}})
+        return _completion('Aquí está:\n```json\n{"title": "x", "kind": "otro", "score": "0.7"}\n```')
+
+    llm = _openrouter(handler)
+    data = llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert data == {"title": "x", "kind": "fact", "items": [], "score": 0.7}   # conformed to the schema
+    assert "JSON schema" in calls[1]["messages"][0]["content"]
+    assert llm.price_of("spastealth/space-bunny-alpha") == max(PRICING.values())  # unknown price: conservative
+
+
+@pytest.mark.parametrize("status,kind", [(401, ErrorKind.INVALID_CREDENTIALS), (402, ErrorKind.NO_BALANCE),
+                                         (400, ErrorKind.MODEL_ERROR)])
+def test_openrouter_errors_are_typed(status, kind):
+    import httpx
+    llm = _openrouter(lambda r: httpx.Response(status, json={"error": {"code": status, "message": "nope"}}))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.kind == kind
+
+
+def test_openrouter_retries_transient_errors_and_reports_truncation():
+    import httpx
+    state = {"n": 0}
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(503, json={"error": {"code": 503, "message": "busy"}})
+        return _completion('{"title": "t"', finish="length")
+
+    llm = _openrouter(handler)
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.kind == ErrorKind.EXTRACTION_INCOMPLETE and state["n"] == 2
+
+
+def test_openrouter_requires_a_key():
+    from ros.llm import OpenRouterLLM
+    with pytest.raises(RosError) as info:
+        OpenRouterLLM("m", api_key="")
+    assert info.value.kind == ErrorKind.INVALID_CREDENTIALS
