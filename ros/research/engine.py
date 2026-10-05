@@ -47,7 +47,8 @@ class ResearchEngine:
                exclude_domains: tuple[str, ...] = ()) -> int:
         budget = budget or self.app.settings.budget
         cfg = {"focus": focus, "exclude_domains": sorted(set(exclude_domains) | set(self.app.settings.exclude_domains)),
-               "model": self.app.settings.model, "search_backend": self.app.search.name,
+               "models": {r: self.app.settings.role(r) for r in ("orchestrator", "validator", "worker")},
+               "search_backend": self.app.search.name,
                "doc_chars": self.app.settings.doc_chars}
         ts = now_iso()
         run_id = self.db.insert("runs", {"kind": "research", "objective": objective.strip(), "status": "planned",
@@ -55,6 +56,11 @@ class ResearchEngine:
                                          "budget_json": dumps(budget.to_dict()), "created_at": ts, "updated_at": ts})
         self.db.log(run_id, "created", "investigación creada", {"budget": budget.to_dict(), "config": cfg})
         return run_id
+
+    def _ask(self, stage: str, system: str, user: str, schema: dict, ledger: Ledger) -> dict:
+        llm = self.app.llm(prompts.STAGE_ROLE[stage])
+        return llm.complete_json(purpose=stage, system=system, user=user, schema=schema,
+                                 max_tokens=prompts.MAX_TOKENS[stage], ledger=ledger)
 
     def _set(self, run_id: int, **values) -> None:
         values["updated_at"] = now_iso()
@@ -114,8 +120,7 @@ class ResearchEngine:
         user = f"Research objective:\n{objective}\n"
         if cfg.get("focus"):
             user += f"\nThe user asks to pay special attention to:\n{cfg['focus']}\n"
-        plan = self.app.llm.complete_json(purpose="plan", system=prompts.PLAN_SYSTEM, user=user,
-                                          schema=prompts.PLAN_SCHEMA, max_tokens=4000, ledger=ledger)
+        plan = self._ask("plan", prompts.PLAN_SYSTEM, user, prompts.PLAN_SCHEMA, ledger)
         for i, sq in enumerate(plan["subquestions"]):
             sq["id"] = sq.get("id") or f"q{i + 1}"
             sq["origin"] = "plan"
@@ -387,10 +392,10 @@ class ResearchEngine:
             user = (f"Research objective:\n{run['objective']}\n\nSub-questions:\n{sq_text}\n\n"
                     f"Document to analyse:\n{wrapped}")
             try:
-                data = self.app.llm.complete_json(purpose="extract", system=prompts.EXTRACT_SYSTEM, user=user,
-                                                  schema=prompts.EXTRACT_SCHEMA, max_tokens=4000, ledger=ledger)
+                data = self._ask("extract", prompts.EXTRACT_SYSTEM, user, prompts.EXTRACT_SCHEMA, ledger)
             except RosError as exc:
-                if exc.fatal:
+                # Budget exhaustion stops the round; the document stays 'fetched' (pending), not failed.
+                if exc.fatal or isinstance(exc, BudgetExhausted):
                     raise
                 self.db.record_error(run_id=run_id, kind=exc.kind.value, subject=r["url"], message=exc.message,
                                      impact="documento descargado pero no analizado")
@@ -446,8 +451,7 @@ class ResearchEngine:
                 f"Propose at most {budget.queries_per_round} next queries.\n\n"
                 f"Claims gathered so far (untrusted data):\n<claims>\n{claims_txt or '(none)'}\n</claims>")
         self.echo("  ⚙ analizando la ronda…")
-        analysis = self.app.llm.complete_json(purpose="analyze", system=prompts.ANALYZE_SYSTEM, user=user,
-                                              schema=prompts.ANALYZE_SCHEMA, max_tokens=8000, ledger=ledger)
+        analysis = self._ask("analyze", prompts.ANALYZE_SYSTEM, user, prompts.ANALYZE_SCHEMA, ledger)
         valid_ids = set(hosts)
         ts = now_iso()
         with self.db.tx():
@@ -516,7 +520,7 @@ class ResearchEngine:
         self._set(run_id, stage="reporting")
         ledger.enter_final_phase()
         run = self.db.one("SELECT * FROM runs WHERE id=?", (run_id,))
-        synthesis, synth_error = None, None
+        synthesis, synth_error, validation = None, None, None
         if self._has_material(run_id):
             self.echo("\n· Redactando informe…")
             try:
@@ -525,6 +529,14 @@ class ResearchEngine:
                 synth_error = exc
                 self.db.record_error(run_id=run_id, kind=exc.kind.value, message=exc.message,
                                      impact="informe generado sin síntesis del modelo (solo hallazgos)")
+        if synthesis:
+            self.echo("· Validando el informe contra la evidencia…")
+            try:
+                validation = self._validate(run_id, synthesis, ledger)
+                self.db.log(run_id, "validation", validation["overall"], validation)
+            except RosError as exc:
+                self.db.record_error(run_id=run_id, kind=exc.kind.value, message=exc.message,
+                                     impact="el informe no pudo validarse contra la evidencia")
         total = self.db.one("SELECT COUNT(*) c FROM run_items WHERE run_id=? AND status NOT IN ('candidate','rejected')",
                             (run_id,))["c"]
         failed = self.db.one("SELECT COUNT(*) c FROM run_items WHERE run_id=? AND status='failed'", (run_id,))["c"]
@@ -544,7 +556,7 @@ class ResearchEngine:
             status = "partial" if total else "failed"
         ledger.checkpoint_time()
         md = render_report(self.db, run_id, synthesis=synthesis, stop_reason=stop_reason, degraded=degraded,
-                           status=status, usage=ledger.summary())
+                           status=status, usage=ledger.summary(), validation=validation)
         self._set(run_id, status=status, stage="done", report_md=md, finished_at=now_iso(),
                   outcome_note="; ".join(degraded) or stop_reason)
         self.db.log(run_id, "finished", status, {"degraded": degraded, "stop_reason": stop_reason})
@@ -563,5 +575,24 @@ class ResearchEngine:
         user = (f"Objective:\n{objective}\n\nLatest findings, contradictions and gaps:\n{ftxt or '(none)'}\n\n"
                 f"Discovered subtopics:\n{dtxt or '(none)'}\n\nCollection errors: {etxt}\n\n"
                 f"All claims (untrusted data):\n<claims>\n{claims_txt}\n</claims>")
-        return self.app.llm.complete_json(purpose="synthesize", system=prompts.SYNTH_SYSTEM, user=user,
-                                          schema=prompts.SYNTH_SCHEMA, max_tokens=12000, ledger=ledger)
+        return self._ask("synthesize", prompts.SYNTH_SYSTEM, user, prompts.SYNTH_SCHEMA, ledger)
+
+    def _validate(self, run_id: int, synthesis: dict, ledger: Ledger) -> dict:
+        """Second opinion from the validator model: does each conclusion follow from its cited claims?"""
+        cited = set()
+        for text in [synthesis["executive_summary"], *(sec["body"] for sec in synthesis["sections"])]:
+            cited.update(int(i) for i in re.findall(r"\[C(\d+)\]", text))
+        for c in synthesis["conclusions"]:
+            cited.update(c["claim_ids"])
+        claims = self.db.all(
+            f"""SELECT c.id, c.claim_type, c.status, c.text, i.url FROM claims c JOIN items i ON i.id=c.item_id
+                WHERE c.run_id=? AND c.id IN ({",".join("?" * len(cited)) or "NULL"})""", (run_id, *sorted(cited)))
+        claims_txt = "\n".join(f"C{c['id']} [{c['claim_type']}, {c['status']}] ({host_of(c['url'])}): {c['text']}"
+                               for c in claims)
+        conclusions = "\n".join(f"{k}. ({c['confidence']}) {c['text']} cites {c['claim_ids']}"
+                                for k, c in enumerate(synthesis["conclusions"]))
+        sections = "\n\n".join(f"## {sec['heading']}\n{sec['body']}" for sec in synthesis["sections"])
+        user = (f"Draft report:\n# {synthesis['title']}\n{synthesis['executive_summary']}\n\n{sections}\n\n"
+                f"Conclusions (by index):\n{conclusions or '(none)'}\n\n"
+                f"Cited claims (untrusted data):\n<claims>\n{claims_txt or '(none)'}\n</claims>")
+        return self._ask("validate", prompts.VALIDATE_SYSTEM, user, prompts.VALIDATE_SCHEMA, ledger)

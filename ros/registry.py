@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import Settings
 from .connectors.base import SearchBackend
@@ -19,17 +19,20 @@ from .security import SafeFetcher
 class App:
     settings: Settings
     db: Database
-    _llm: LLM | None
+    _llm: LLM | None              # when injected (tests, offline), one model serves every role
     fetcher: SafeFetcher
     search: SearchBackend
     connectors: dict
+    _llms: dict = field(default_factory=dict)
 
-    @property
-    def llm(self) -> LLM:
-        # Built lazily so read-only commands work without model credentials.
-        if self._llm is None:
-            self._llm = build_llm(self.settings)
-        return self._llm
+    def llm(self, role: str) -> LLM:
+        """Model for a role (orchestrator | validator | worker). Built lazily, so read-only
+        commands work without model credentials."""
+        if self._llm is not None:
+            return self._llm
+        if role not in self._llms:
+            self._llms[role] = build_llm(self.settings, role, shared=next(iter(self._llms.values()), None))
+        return self._llms[role]
 
     def connector(self, kind: str):
         if kind not in self.connectors:
@@ -49,9 +52,11 @@ def build_search(settings: Settings) -> SearchBackend:
     raise ValueError(f"unknown search backend {settings.search_backend!r}")
 
 
-def build_llm(settings: Settings) -> LLM:
+def build_llm(settings: Settings, role: str, shared: LLM | None = None) -> LLM:
+    model, effort = settings.role(role)
     if settings.llm == "anthropic":
-        return AnthropicLLM(model=settings.model, effort=settings.effort)
+        client = shared.client if isinstance(shared, AnthropicLLM) else None
+        return AnthropicLLM(model=model, effort=effort, workspace_id=settings.anthropic_workspace_id, client=client)
     if settings.llm == "fake":
         from .offline import offline_handler
         return FakeLLM(offline_handler)
