@@ -1,6 +1,8 @@
 # ROS
 
 Sistema de investigación profunda y monitorización de fuentes, para la terminal.
+**Para continuar el trabajo: [`docs/HANDOFF.md`](docs/HANDOFF.md).**
+
 Requisitos del producto: [`docs/specs.txt`](docs/specs.txt). Diseño de referencia: [`docs/2026-09-15-ros-complete-application-design.md`](docs/2026-09-15-ros-complete-application-design.md). Plan por fases: [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Estado: fases 0–8 del roadmap implementadas
