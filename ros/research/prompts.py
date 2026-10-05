@@ -13,6 +13,11 @@ into concrete sub-questions (including ones the user did not ask but needs: risk
 key actors, terminology, dependencies), and propose diverse web search queries for round 1.
 Queries must be short (what a person types into a search engine), varied in angle and vocabulary,
 and include at least one query aimed at primary sources and one at critical or opposing views.
+Also extract from the user's wording: focus (aspects they asked to pay special attention to, "" if none),
+excluded_domains (web domains they asked to avoid) and alternative_interpretations (only when the objective
+could reasonably mean materially different things; otherwise empty).
+If earlier conclusions are provided as context, use them to avoid repeating work and to target what is
+still unknown, but do not treat them as evidence.
 {LANG}"""
 
 PLAN_SCHEMA = obj({
@@ -22,6 +27,9 @@ PLAN_SCHEMA = obj({
     "key_terms": arr(STR),
     "queries": arr(obj({"text": STR, "rationale": STR, "subquestion_id": STR})),
     "stop_criteria": STR,
+    "focus": STR,
+    "excluded_domains": arr(STR),
+    "alternative_interpretations": arr(STR),
 })
 
 EXTRACT_SYSTEM = f"""You are the evidence-extraction stage of ROS.

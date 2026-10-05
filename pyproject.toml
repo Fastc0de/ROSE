@@ -1,13 +1,15 @@
 [project]
 name = "ros"
-version = "0.1.0"
+version = "0.2.0"
 description = "ROS: investigación profunda, monitorización de fuentes y digestos desde la terminal"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "anthropic>=1.0",
+    "fastapi>=0.110",
     "httpx>=0.27",
     "pydantic>=2.6",
+    "uvicorn>=0.29",
 ]
 
 [project.scripts]

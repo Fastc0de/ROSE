@@ -14,7 +14,7 @@ from urllib.parse import quote_plus, urlsplit
 
 from ..errors import ErrorKind, RosError
 from ..security import SafeFetcher, canonical_url
-from .base import Capabilities, NormalizedItem, SourceSpec, SyncResult
+from .base import Capabilities, ConnectorStatus, NormalizedItem, SourceSpec, SyncResult
 from .extract import html_to_text
 
 FEED_TYPES = ("application/rss+xml", "application/atom+xml", "application/xml", "text/xml", "text/html",
@@ -116,6 +116,9 @@ class FeedConnector:
         return Capabilities(self.connector_id, self.access_mode, ("validate", "sync"), cursor=True,
                             notes="Solo cubre lo que publica el feed; no implica cobertura completa del sitio.")
 
+    def status(self) -> ConnectorStatus:
+        return ConnectorStatus("ready", "acceso público, sin credenciales")
+
     def feed_url(self, locator: str) -> str:
         return locator.strip()
 
@@ -216,6 +219,9 @@ class WebPageConnector:
     def capabilities(self) -> Capabilities:
         return Capabilities(self.connector_id, self.access_mode, ("validate", "sync", "fetch"), cursor=True,
                             notes="Detecta cambios en el texto legible de una página pública.")
+
+    def status(self) -> ConnectorStatus:
+        return ConnectorStatus("ready", "acceso público, sin credenciales")
 
     def validate(self, locator: str) -> SourceSpec:
         doc = self.fetch(locator)

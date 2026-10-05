@@ -19,8 +19,9 @@ from typing import Callable
 from ..budget import Budget, Ledger
 from ..connectors.base import NormalizedItem
 from ..connectors.feeds import WebPageConnector, host_of
-from ..db import dumps, loads, now_iso, text_hash
+from ..db import dumps, loads, lock_owner, now_iso, text_hash
 from ..errors import BudgetExhausted, ErrorKind, RosError
+from ..knowledge import find_near_duplicate, prior_knowledge, source_reputation
 from ..registry import App
 from ..security import canonical_url, host_in, wrap_untrusted
 from . import prompts
@@ -28,6 +29,19 @@ from .report import render_report
 
 TERMINAL = {"completed", "partial", "cancelled"}
 MAX_PER_HOST_PER_ROUND = 2
+LOCK_TTL = 600
+GOOD_COVERAGE = 0.6
+
+
+class RunBusy(RuntimeError):
+    """Another process is executing this run right now."""
+
+
+class _Yield(Exception):
+    """Internal: stop at a safe checkpoint (cancellation or shutdown requested)."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
 
 
 def norm_query(text: str) -> str:
@@ -36,28 +50,35 @@ def norm_query(text: str) -> str:
 
 
 class ResearchEngine:
-    def __init__(self, app: App, *, echo: Callable[[str], None] = lambda s: None, sleep=time.sleep):
+    def __init__(self, app: App, *, echo: Callable[[str], None] = lambda s: None, sleep=time.sleep,
+                 stop_requested: Callable[[], bool] = lambda: False):
         self.app = app
         self.db = app.db
         self.echo = echo
         self.sleep = sleep
+        self.stop_requested = stop_requested
+        self.owner = lock_owner()
+        self._run_id: int | None = None
 
     # ------------------------------------------------------------------ setup
     def create(self, objective: str, budget: Budget | None = None, *, focus: str = "",
-               exclude_domains: tuple[str, ...] = ()) -> int:
+               exclude_domains: tuple[str, ...] = (), status: str = "planned", trigger: str = "user") -> int:
         budget = budget or self.app.settings.budget
         cfg = {"focus": focus, "exclude_domains": sorted(set(exclude_domains) | set(self.app.settings.exclude_domains)),
                "models": {r: self.app.settings.role(r) for r in ("orchestrator", "validator", "worker")},
                "search_backend": self.app.search.name,
                "doc_chars": self.app.settings.doc_chars}
         ts = now_iso()
-        run_id = self.db.insert("runs", {"kind": "research", "objective": objective.strip(), "status": "planned",
-                                         "stage": "planning", "config_json": dumps(cfg),
+        if not objective.strip():
+            raise ValueError("el objetivo de la investigación está vacío")
+        run_id = self.db.insert("runs", {"kind": "research", "objective": objective.strip(), "status": status,
+                                         "stage": "planning", "config_json": dumps(cfg), "trigger": trigger,
                                          "budget_json": dumps(budget.to_dict()), "created_at": ts, "updated_at": ts})
         self.db.log(run_id, "created", "investigación creada", {"budget": budget.to_dict(), "config": cfg})
         return run_id
 
     def _ask(self, stage: str, system: str, user: str, schema: dict, ledger: Ledger) -> dict:
+        self._checkpoint(ledger)
         llm = self.app.llm(prompts.STAGE_ROLE[stage])
         return llm.complete_json(purpose=stage, system=system, user=user, schema=schema,
                                  max_tokens=prompts.MAX_TOKENS[stage], ledger=ledger)
@@ -67,6 +88,54 @@ class ResearchEngine:
         cols = ", ".join(f"{k}=?" for k in values)
         self.db.execute(f"UPDATE runs SET {cols} WHERE id=?", (*values.values(), run_id))
 
+    # ------------------------------------------------------------------ control
+    def _checkpoint(self, ledger: Ledger) -> None:
+        """Safe point: persist time, keep the run lock, honour cancellation and shutdown requests."""
+        if self._run_id is None or ledger.run_id != self._run_id:
+            return
+        ledger.checkpoint_time()
+        if not self.db.acquire_lock(f"run:{self._run_id}", self.owner, LOCK_TTL):
+            raise RunBusy(f"la investigación #{self._run_id} la ejecuta otro proceso")
+        row = self.db.one("SELECT cancel_requested FROM runs WHERE id=?", (self._run_id,))
+        if row and row["cancel_requested"]:
+            raise _Yield("cancel")
+        if self.stop_requested():
+            raise _Yield("shutdown")
+
+    def cancel(self, run_id: int) -> str:
+        """Request cancellation. A run not executing right now is closed immediately with a partial report."""
+        run = self.db.one("SELECT * FROM runs WHERE id=?", (run_id,))
+        if run is None:
+            raise ValueError(f"no existe la investigación #{run_id}")
+        if run["status"] in TERMINAL:
+            return run["status"]
+        self.db.execute("UPDATE runs SET cancel_requested=1, updated_at=? WHERE id=?", (now_iso(), run_id))
+        if not self.db.acquire_lock(f"run:{run_id}", self.owner, LOCK_TTL):
+            return "cancelling"   # the executing process stops at its next checkpoint
+        try:
+            budget = Budget.from_dict(loads(run["budget_json"]))
+            return self._finalize(run_id, "cancelada por el usuario", None, Ledger(self.db, run_id, budget),
+                                  cancelled=True)
+        finally:
+            self.db.release_lock(f"run:{run_id}", self.owner)
+
+    def prepare(self, run_id: int) -> dict:
+        """Plan only (for review before execution). Idempotent: an existing plan is returned as is."""
+        run = self.db.one("SELECT * FROM runs WHERE id=?", (run_id,))
+        if run is None:
+            raise ValueError(f"no existe la investigación #{run_id}")
+        if run["plan_json"]:
+            return loads(run["plan_json"])
+        if not self.db.acquire_lock(f"run:{run_id}", self.owner, LOCK_TTL):
+            raise RunBusy(f"la investigación #{run_id} la ejecuta otro proceso")
+        try:
+            ledger = Ledger(self.db, run_id, Budget.from_dict(loads(run["budget_json"])))
+            self._plan(run_id, run["objective"], loads(run["config_json"]), ledger)
+            ledger.checkpoint_time()
+        finally:
+            self.db.release_lock(f"run:{run_id}", self.owner)
+        return self._plan_of(run_id)
+
     # ------------------------------------------------------------------ main loop
     def run(self, run_id: int) -> str:
         run = self.db.one("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -74,28 +143,55 @@ class ResearchEngine:
             raise ValueError(f"run {run_id} not found")
         if run["status"] in TERMINAL:
             return run["status"]
+        if not self.db.acquire_lock(f"run:{run_id}", self.owner, LOCK_TTL):
+            raise RunBusy(f"la investigación #{run_id} la ejecuta otro proceso")
+        self._run_id = run_id
+        try:
+            return self._run(run_id, run)
+        finally:
+            self._run_id = None
+            self.db.release_lock(f"run:{run_id}", self.owner)
+
+    def _run(self, run_id: int, run) -> str:
         budget = Budget.from_dict(loads(run["budget_json"]))
         cfg = loads(run["config_json"])
         ledger = Ledger(self.db, run_id, budget)
+        if run["cancel_requested"]:
+            return self._finalize(run_id, "cancelada por el usuario", None, ledger, cancelled=True)
         self._set(run_id, status="running")
         self.db.log(run_id, "resumed" if run["plan_json"] else "started", "ejecución iniciada")
         stop_reason, limit_hit = None, None
         try:
             if not run["plan_json"]:
                 self._plan(run_id, run["objective"], cfg, ledger)
+            cfg = loads(self.db.one("SELECT config_json FROM runs WHERE id=?", (run_id,))["config_json"])
             while True:
-                ledger.checkpoint_time()
-                stop_reason = self._should_stop(run_id, budget)
+                self._checkpoint(ledger)
+                stop_reason = self._should_stop(run_id, budget, ledger)
                 if stop_reason:
                     break
                 rnd = self._current_round(run_id, budget)
                 self._execute_round(run_id, rnd, cfg, budget, ledger)
+        except _Yield as y:
+            ledger.checkpoint_time()
+            if y.reason == "cancel":
+                self.echo("\n■ Cancelada. Se conserva el progreso y un informe parcial.")
+                return self._finalize(run_id, "cancelada por el usuario", None, ledger, cancelled=True)
+            self._set(run_id, status="queued")
+            self.db.log(run_id, "yielded", "detenida para apagar el proceso; se reanudará")
+            return "queued"
         except BudgetExhausted as exc:
-            limit_hit = exc.limit
             stop_reason = f"límite alcanzado: {exc.message}"
-            self.db.record_error(run_id=run_id, kind=exc.kind.value, message=exc.message,
-                                 impact="la investigación se detuvo antes de completar el plan")
-            self.echo(f"⚠ {exc.message}")
+            coverage = self._coverage(run_id)
+            if exc.limit == "sources" and coverage >= GOOD_COVERAGE:
+                # Hitting the source cap after covering the plan is a normal stop, not a degraded result.
+                stop_reason = f"tope de fuentes alcanzado tras cubrir el plan (cobertura {coverage:.0%})"
+                self.db.log(run_id, "limit", exc.message)
+            else:
+                limit_hit = exc.limit
+                self.db.record_error(run_id=run_id, kind=exc.kind.value, message=exc.message,
+                                     impact="la investigación se detuvo antes de completar el plan")
+                self.echo(f"⚠ {exc.message}")
         except KeyboardInterrupt:
             ledger.checkpoint_time()
             self._set(run_id, status="paused")
@@ -113,6 +209,11 @@ class ResearchEngine:
         self.db.log(run_id, "stop", stop_reason or "fin")
         return self._finalize(run_id, stop_reason or "", limit_hit, ledger)
 
+    def _coverage(self, run_id: int) -> float:
+        row = self.db.one("SELECT analysis_json FROM rounds WHERE run_id=? AND stage='done' ORDER BY n DESC LIMIT 1",
+                          (run_id,))
+        return float((loads(row["analysis_json"], {}) or {}).get("coverage", 0)) if row else 0.0
+
     # ------------------------------------------------------------------ planning
     def _plan(self, run_id: int, objective: str, cfg: dict, ledger: Ledger) -> None:
         self._set(run_id, stage="planning")
@@ -120,7 +221,21 @@ class ResearchEngine:
         user = f"Research objective:\n{objective}\n"
         if cfg.get("focus"):
             user += f"\nThe user asks to pay special attention to:\n{cfg['focus']}\n"
+        known = prior_knowledge(self.db, objective, exclude_run_id=run_id)
+        if known:
+            # Earlier conclusions guide the plan (avoid repeating work); they are NOT evidence for this run.
+            user += ("\nAlready known from earlier research (context only, not evidence; verify if relied upon):\n"
+                     + "\n".join(f"- [{k['confidence']}] {k['title']}: {k['summary'][:300]} (research #{k['run_id']})"
+                                  for k in known) + "\n")
+            self.db.log(run_id, "prior_knowledge", f"{len(known)} hallazgos previos usados como contexto",
+                        [k["id"] for k in known])
         plan = self._ask("plan", prompts.PLAN_SYSTEM, user, prompts.PLAN_SCHEMA, ledger)
+        focus = " ".join(x for x in (cfg.get("focus", ""), plan.get("focus", "")) if x).strip()
+        excluded = sorted({d.strip().lower() for d in plan.get("excluded_domains", []) if d.strip()}
+                          | set(cfg.get("exclude_domains", [])))
+        if focus != cfg.get("focus", "") or excluded != cfg.get("exclude_domains", []):
+            cfg = {**cfg, "focus": focus, "exclude_domains": excluded}
+            self._set(run_id, config_json=dumps(cfg))
         for i, sq in enumerate(plan["subquestions"]):
             sq["id"] = sq.get("id") or f"q{i + 1}"
             sq["origin"] = "plan"
@@ -144,13 +259,15 @@ class ResearchEngine:
     def _rounds(self, run_id: int):
         return self.db.all("SELECT * FROM rounds WHERE run_id=? ORDER BY n", (run_id,))
 
-    def _should_stop(self, run_id: int, budget: Budget) -> str | None:
+    def _should_stop(self, run_id: int, budget: Budget, ledger: Ledger) -> str | None:
         rounds = self._rounds(run_id)
         if not rounds or rounds[-1]["stage"] != "done":
             return None
         last = loads(rounds[-1]["analysis_json"], {})
         if len(rounds) >= budget.max_rounds:
             return f"máximo de rondas alcanzado ({budget.max_rounds})"
+        if ledger.fetched_sources() >= budget.max_sources and last.get("coverage", 0) >= GOOD_COVERAGE:
+            return f"tope de fuentes alcanzado tras cubrir el plan (cobertura {last.get('coverage', 0):.0%})"
         if last.get("should_stop") and last.get("coverage", 0) >= 0.6:
             return f"cobertura suficiente ({last.get('coverage', 0):.0%}): {last.get('stop_reason', '')}"
         if not self._pending_next_queries(run_id, last):
@@ -282,8 +399,11 @@ class ResearchEngine:
         per_host = Counter(host_of(r["url"]) for r in self.db.all(
             "SELECT url FROM run_items WHERE run_id=? AND status IN ('extracted','irrelevant','fetched','reused')", (run_id,)))
         chosen, round_hosts = [], Counter()
-        # Diversity first: at most N per host per round, prefer hosts not yet used in this run.
-        rows = sorted(rows, key=lambda r: (per_host[host_of(r["url"])], r["round_n"] != n, r["id"]))
+        reputation = {r["host"]: r["score"] for r in source_reputation(self.db)} if rows else {}
+        # Diversity first: at most N per host per round, prefer hosts not yet used in this run;
+        # then the current round's candidates, then hosts with a better track record.
+        rows = sorted(rows, key=lambda r: (per_host[host_of(r["url"])], r["round_n"] != n,
+                                           -round(reputation.get(host_of(r["url"]), 0.5), 1), r["id"]))
         for r in rows:
             h = host_of(r["url"])
             if round_hosts[h] >= MAX_PER_HOST_PER_ROUND:
@@ -387,6 +507,14 @@ class ResearchEngine:
             if already:
                 self.db.execute("UPDATE run_items SET status='extracted' WHERE id=?", (r["rid"],))
                 continue
+            near = self._near_duplicate_in_run(run_id, r)
+            if near:
+                # Same story re-published elsewhere: keep it as provenance, do not pay to analyse it twice.
+                self.db.execute("UPDATE items SET near_duplicate_of=COALESCE(near_duplicate_of, ?) WHERE id=?",
+                                (near, r["item_id"]))
+                self.db.execute("UPDATE run_items SET status='irrelevant', reason=? WHERE id=?",
+                                (f"casi duplicado del item {near}", r["rid"]))
+                continue
             wrapped, truncated = wrap_untrusted(f"TITLE: {r['title']}\nURL: {r['url']}\n\n{r['text']}",
                                                 label=r["url"], max_chars=cfg.get("doc_chars", 12000))
             user = (f"Research objective:\n{run['objective']}\n\nSub-questions:\n{sq_text}\n\n"
@@ -424,6 +552,13 @@ class ResearchEngine:
                 self.db.execute("UPDATE run_items SET status=? WHERE id=?",
                                 ("extracted" if data["relevant"] else "irrelevant", r["rid"]))
             self.echo(f"  ✎ {len(data['claims']) if data['relevant'] else 0} afirmaciones · {r['title'][:60]}")
+
+    def _near_duplicate_in_run(self, run_id: int, r) -> int | None:
+        near = find_near_duplicate(self.db, r["text"] or "", exclude_item_id=r["item_id"], days=3650)
+        if near and self.db.one("SELECT 1 FROM run_items WHERE run_id=? AND item_id=? AND status='extracted'",
+                                (run_id, near)):
+            return near
+        return None
 
     # ------------------------------------------------------------------ analyze
     def _claims_context(self, run_id: int) -> tuple[str, dict[int, str]]:
@@ -516,12 +651,13 @@ class ResearchEngine:
     def _has_material(self, run_id: int) -> bool:
         return bool(self.db.one("SELECT 1 FROM claims WHERE run_id=? LIMIT 1", (run_id,)))
 
-    def _finalize(self, run_id: int, stop_reason: str, limit_hit: str | None, ledger: Ledger) -> str:
+    def _finalize(self, run_id: int, stop_reason: str, limit_hit: str | None, ledger: Ledger, *,
+                  cancelled: bool = False) -> str:
         self._set(run_id, stage="reporting")
         ledger.enter_final_phase()
         run = self.db.one("SELECT * FROM runs WHERE id=?", (run_id,))
         synthesis, synth_error, validation = None, None, None
-        if self._has_material(run_id):
+        if self._has_material(run_id) and not cancelled:
             self.echo("\n· Redactando informe…")
             try:
                 synthesis = self._synthesize(run_id, run["objective"], ledger)
@@ -551,9 +687,13 @@ class ResearchEngine:
             degraded.append("no se obtuvo ninguna evidencia")
         if run["status"] == "failed":
             degraded.append(run["outcome_note"] or "error durante la ejecución")
+        if cancelled:
+            degraded.append("cancelada por el usuario antes de terminar")
         status = "partial" if degraded else "completed"
         if not self._has_material(run_id) and not synthesis:
             status = "partial" if total else "failed"
+        if cancelled:
+            status = "cancelled"
         ledger.checkpoint_time()
         md = render_report(self.db, run_id, synthesis=synthesis, stop_reason=stop_reason, degraded=degraded,
                            status=status, usage=ledger.summary(), validation=validation)

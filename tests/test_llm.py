@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -5,7 +6,7 @@ import pytest
 from ros.budget import Budget, Ledger
 from ros.db import now_iso
 from ros.errors import BudgetExhausted, ErrorKind, RosError
-from ros.llm import AnthropicLLM, FakeLLM, price
+from ros.llm import PRICING, AnthropicLLM, FakeLLM, price
 
 SCHEMA = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
           "additionalProperties": False}
@@ -141,3 +142,219 @@ def test_missing_workspace_is_reported_clearly(ledger):
     with pytest.raises(RosError) as info:
         llm.complete_json(purpose="plan", system="s", user="u", schema=SCHEMA, max_tokens=100, ledger=ledger)
     assert info.value.kind == ErrorKind.INVALID_CREDENTIALS and "ANTHROPIC_WORKSPACE_ID" in info.value.message
+
+
+# -- OpenRouter -----------------------------------------------------------
+
+def _openrouter(handler, **kw):
+    import httpx
+
+    from ros.llm import OpenRouterLLM
+    OpenRouterLLM._catalog.clear()
+    return OpenRouterLLM("spastealth/space-bunny-alpha", api_key="sk-or-test",
+                         client=httpx.Client(transport=httpx.MockTransport(handler)), sleep=lambda s: None, **kw)
+
+
+OR_SCHEMA = {"type": "object", "properties": {"title": {"type": "string"},
+                                            "kind": {"type": "string", "enum": ["fact", "rumor"]},
+                                            "items": {"type": "array", "items": {"type": "string"}},
+                                            "score": {"type": "number"}},
+          "required": ["title", "kind", "items", "score"], "additionalProperties": False}
+
+
+def _completion(content, usage=None, finish="stop"):
+    import httpx
+    return httpx.Response(200, json={"model": "spastealth/space-bunny-alpha",
+                                     "choices": [{"message": {"content": content}, "finish_reason": finish}],
+                                     "usage": usage or {"prompt_tokens": 100, "completion_tokens": 20, "cost": 0.0012}})
+
+
+def test_openrouter_structured_call_bills_reported_cost(db):
+    import httpx
+    sent = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "spastealth/space-bunny-alpha",
+                                                       "pricing": {"prompt": "0.000001", "completion": "0.000002"}}]})
+        sent.append(json.loads(request.content))
+        return _completion('{"title": "t", "kind": "fact", "items": ["a"], "score": 0.5}')
+
+    llm = _openrouter(handler)
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    data = llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=ledger)
+    assert data == {"title": "t", "kind": "fact", "items": ["a"], "score": 0.5}
+    body = sent[0]
+    assert body["model"] == "spastealth/space-bunny-alpha" and body["max_tokens"] == 4000
+    assert body["response_format"]["json_schema"]["schema"] == OR_SCHEMA and body["usage"] == {"include": True}
+    assert llm.price_of("spastealth/space-bunny-alpha") == pytest.approx((1.0, 2.0))
+    row = db.one("SELECT model, input_tokens, output_tokens, cost_usd FROM usage")
+    assert (row["model"], row["input_tokens"], row["output_tokens"]) == ("spastealth/space-bunny-alpha", 100, 20)
+    assert row["cost_usd"] == pytest.approx(0.0012)
+
+
+def test_openrouter_lenient_parsing_and_schema_fallback():
+    import httpx
+    calls = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        body = json.loads(request.content)
+        calls.append(body)
+        if "response_format" in body:
+            return httpx.Response(404, json={"error": {"code": 404,
+                                                       "message": "No endpoints found that support response_format"}})
+        return _completion('Aquí está:\n```json\n{"title": "x", "kind": "otro", "items": "a", "score": "0.7"}\n```')
+
+    llm = _openrouter(handler)
+    data = llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert data == {"title": "x", "kind": "fact", "items": ["a"], "score": 0.7}   # conformed to the schema
+    assert "JSON schema" in calls[1]["messages"][0]["content"]
+    assert llm.price_of("spastealth/space-bunny-alpha") == max(PRICING.values())  # unknown price: conservative
+
+
+@pytest.mark.parametrize("status,kind", [(401, ErrorKind.INVALID_CREDENTIALS), (402, ErrorKind.NO_BALANCE),
+                                         (400, ErrorKind.MODEL_ERROR)])
+def test_openrouter_errors_are_typed(status, kind):
+    import httpx
+    llm = _openrouter(lambda r: httpx.Response(status, json={"error": {"code": status, "message": "nope"}}))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.kind == kind
+
+
+def test_openrouter_retries_transient_errors_and_reports_truncation():
+    import httpx
+    state = {"n": 0}
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        state["n"] += 1
+        if state["n"] == 1:
+            return httpx.Response(503, json={"error": {"code": 503, "message": "busy"}})
+        return _completion('{"title": "t"', finish="length")
+
+    llm = _openrouter(handler)
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.kind == ErrorKind.EXTRACTION_INCOMPLETE and state["n"] == 2
+
+
+def test_openrouter_requires_a_key():
+    from ros.llm import OpenRouterLLM
+    with pytest.raises(RosError) as info:
+        OpenRouterLLM("m", api_key="")
+    assert info.value.kind == ErrorKind.INVALID_CREDENTIALS
+
+
+def test_openrouter_never_guesses_missing_required_fields(db):
+    import httpx
+    answers = ['{"title": "t", "kind": "fact", "items": []}',                       # no score: retried
+               '{"title": "t", "kind": "fact", "items": [], "score": 1}']
+    bodies = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        bodies.append(json.loads(request.content))
+        return _completion(answers.pop(0))
+
+    llm = _openrouter(handler)
+    assert llm.complete_json(purpose="triage", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=None)["score"] == 1.0
+    assert "Every key in the schema is required" in bodies[1]["messages"][0]["content"]
+
+    answers[:] = ['{"title": "t"}', '{"title": "t"}']
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="triage", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=ledger)
+    assert info.value.kind == ErrorKind.MODEL_ERROR and "faltan" in info.value.message
+    row = db.one("SELECT purpose, input_tokens, cost_usd FROM usage")
+    assert row["purpose"] == "triage:failed" and row["input_tokens"] == 200 and row["cost_usd"] == pytest.approx(0.0024)
+
+
+# -- OpenCode -------------------------------------------------------------
+
+def _opencode(handler):
+    import httpx
+
+    from ros.llm import OpenCodeLLM
+    return OpenCodeLLM("glm-5.3", api_key="oc_sk_test", client=httpx.Client(transport=httpx.MockTransport(handler)),
+                       sleep=lambda s: None)
+
+
+def test_opencode_identifies_client_and_session_per_run(db):
+    import httpx
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json={"model": "glm-5.3", "choices": [{"finish_reason": "stop", "message": {
+            "content": '{"title": "t", "kind": "rumor", "items": [], "score": 1}', "reasoning_content": "…"}}],
+            "usage": {"prompt_tokens": 1000, "completion_tokens": 500}})
+
+    llm = _opencode(handler)
+    ts = now_iso()
+    run = db.insert("runs", {"kind": "research", "objective": "x", "status": "running", "created_at": ts,
+                             "updated_at": ts})
+    ledger = Ledger(db, run, Budget(max_cost_usd=1.0, final_reserve=0.0))
+    assert llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=ledger)["kind"] == "rumor"
+    req = seen[0]
+    assert str(req.url) == "https://opencode.ai/zen/go/v1/chat/completions"
+    assert req.headers["x-opencode-session"] == f"ros-run-{run}"
+    assert req.headers["user-agent"].startswith("ros-research/")
+    assert "usage" not in json.loads(req.content)                      # OpenRouter-only field not sent
+    cost = db.one("SELECT cost_usd FROM usage")["cost_usd"]
+    assert cost == pytest.approx((1000 * 1.40 + 500 * 4.40) / 1_000_000)   # GLM-5.3 Go price
+
+
+def test_opencode_account_settings_error_is_fatal():
+    import httpx
+    llm = _opencode(lambda r: httpx.Response(400, json={"error": {"type": "server_error", "message":
+        "Upstream request failed: This Go model requires Global regions. Select Global in your workspace's "
+        "Privacy settings to use it."}}))
+    with pytest.raises(RosError) as info:
+        llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert info.value.fatal and "Privacy settings" in info.value.message
+
+
+def test_deepseek_on_opencode_uses_json_object_mode():
+    import httpx
+    from ros.llm import OpenCodeLLM
+    bodies = []
+
+    def handler(request):
+        bodies.append(json.loads(request.content))
+        return _completion('{"title": "t", "kind": "fact", "items": [], "score": 1}')
+
+    llm = OpenCodeLLM("deepseek-v4.1-flash", api_key="k", client=httpx.Client(transport=httpx.MockTransport(handler)))
+    llm.complete_json(purpose="extract", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000, ledger=None)
+    assert bodies[0]["response_format"] == {"type": "json_object"}
+    assert "JSON schema" in bodies[0]["messages"][0]["content"]
+
+
+def test_reasoning_that_exhausts_tokens_under_json_schema_falls_back_to_json_object():
+    import httpx
+    answers = [_completion("", finish="length"), _completion('{"title": "t", "kind": "fact", "items": [], "score": 1}')]
+    bodies = []
+
+    def handler(request):
+        if request.url.path.endswith("/models"):
+            return httpx.Response(500)
+        bodies.append(json.loads(request.content))
+        return answers.pop(0)
+
+    llm = _openrouter(handler)
+    assert llm.complete_json(purpose="plan", system="s", user="u", schema=OR_SCHEMA, max_tokens=4000,
+                             ledger=None)["title"] == "t"
+    assert bodies[0]["response_format"]["type"] == "json_schema"
+    assert bodies[1]["response_format"] == {"type": "json_object"}

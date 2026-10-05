@@ -30,7 +30,7 @@ def test_refuses_checksum_drift(tmp_path, monkeypatch):
     path = tmp_path / "ros.db"
     Database(path).close()
     version, sql = dbmod.MIGRATIONS[0]
-    monkeypatch.setattr(dbmod, "MIGRATIONS", [(version, sql + "\n-- edited")])
+    monkeypatch.setattr(dbmod, "MIGRATIONS", [(version, sql + "\n-- edited"), *dbmod.MIGRATIONS[1:]])
     with pytest.raises(RuntimeError, match="checksum drift"):
         Database(path)
 
@@ -138,7 +138,7 @@ def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("ROS_HOME", str(tmp_path / ".ros"))
     for var in ("ROS_DB", "ROS_LLM", "ROS_SEARCH", "ROS_ORCHESTRATOR_MODEL", "ROS_WORKER_MODEL",
-                "ANTHROPIC_WORKSPACE_ID"):
+                "ANTHROPIC_WORKSPACE_ID", "ROS_OPENROUTER_MODEL"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.chdir(tmp_path)
     return tmp_path
@@ -174,8 +174,35 @@ def test_missing_explicit_config_fails(isolated):
 
 def test_default_model_roles(isolated):
     s = load_settings()
-    assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
-    assert s.role("validator") == ("claude-sonnet-5-5", "medium")
-    assert s.role("worker") == ("claude-haiku-4-5", "")
+    assert s.llm == "opencode"
+    assert s.role("orchestrator") == ("glm-5.3", "")
+    assert s.role("validator") == ("glm-5.3", "")
+    assert s.role("worker") == ("deepseek-v4.1-flash", "")
     with pytest.raises(ValueError):
         s.role("boss")
+
+
+def test_role_models_per_provider(isolated, monkeypatch):
+    (isolated / "ros.toml").write_text('worker_model = "glm-5.3-flash"\n')
+    s = load_settings()
+    assert s.role("worker") == ("glm-5.3-flash", "") and s.role("orchestrator")[0] == "glm-5.3"
+    monkeypatch.setenv("ROS_LLM", "openrouter")
+    assert load_settings().role("validator")[0] == "openrouter/free"
+    monkeypatch.setenv("ROS_LLM", "anthropic")
+    s = load_settings()
+    assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
+    assert s.role("validator") == ("claude-sonnet-5-5", "medium")
+    assert s.role("worker") == ("glm-5.3-flash", "")
+
+
+def test_lock_of_a_dead_process_on_this_host_is_released(db):
+    import socket
+    import subprocess
+    import sys
+    from ros.db import lock_owner
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()                                              # a pid that no longer exists
+    dead = f"{socket.gethostname()}:{child.pid}:abcd1234"
+    assert db.acquire_lock("run:1", dead, ttl=600)
+    assert db.acquire_lock("run:1", lock_owner(), ttl=600)    # taken over at once, no 10-minute wait
+    assert not db.acquire_lock("run:1", f"otra-maquina:{child.pid}:x", ttl=600)   # other hosts: honour the TTL
