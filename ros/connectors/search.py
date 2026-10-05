@@ -15,7 +15,7 @@ import httpx
 
 from ..errors import ErrorKind, RosError
 from ..security import SafeFetcher, canonical_url
-from .base import Capabilities, NormalizedItem, SearchHit, SourceSpec, SyncResult
+from .base import Capabilities, ConnectorStatus, NormalizedItem, SearchHit, SourceSpec, SyncResult
 
 
 def _status_error(resp: httpx.Response, name: str) -> RosError | None:
@@ -141,6 +141,9 @@ class SearchWatchConnector:
     def capabilities(self) -> Capabilities:
         return Capabilities(self.connector_id, self.access_mode, ("validate", "sync"), cursor=True,
                             notes=f"Búsqueda web vía {self.backend.name}; cobertura limitada a ese buscador.")
+
+    def status(self) -> ConnectorStatus:
+        return ConnectorStatus("ready", f"buscador: {self.backend.name}")
 
     def validate(self, locator: str) -> SourceSpec:
         if not locator.strip():

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -299,11 +300,158 @@ CREATE TRIGGER claims_ad AFTER DELETE ON claims BEGIN
   INSERT INTO claims_fts(claims_fts, rowid, text) VALUES ('delete', old.id, old.text);
 END;
 """),
+    (2, """
+ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'user';
+
+ALTER TABLE items ADD COLUMN near_duplicate_of INTEGER REFERENCES items(id);
+ALTER TABLE items ADD COLUMN text_pruned_at TEXT;
+
+ALTER TABLE watches ADD COLUMN last_digest_at TEXT;
+ALTER TABLE watches ADD COLUMN expires_at TEXT;
+
+ALTER TABLE watch_items ADD COLUMN source_id INTEGER REFERENCES sources(id);
+ALTER TABLE watch_items ADD COLUMN reason TEXT;
+ALTER TABLE watch_items ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX watch_items_pending ON watch_items(watch_id, analysis);
+
+ALTER TABLE events ADD COLUMN source_id INTEGER REFERENCES sources(id);
+ALTER TABLE events ADD COLUMN observed_at TEXT;
+ALTER TABLE events ADD COLUMN entities_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE events ADD COLUMN policy_json TEXT;
+CREATE UNIQUE INDEX events_observation ON events(watch_id, item_id, observed_at);
+CREATE INDEX events_pending_digest ON events(watch_id, digest_id);
+
+CREATE TABLE event_items (
+    event_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    item_id INTEGER NOT NULL REFERENCES items(id),
+    relation TEXT NOT NULL CHECK (relation IN ('primary','duplicate','near_duplicate')),
+    PRIMARY KEY (event_id, item_id)
+);
+
+ALTER TABLE clusters ADD COLUMN status TEXT NOT NULL DEFAULT 'open';
+ALTER TABLE clusters ADD COLUMN terms_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE clusters ADD COLUMN last_event_at TEXT;
+ALTER TABLE clusters ADD COLUMN analysis_json TEXT;
+ALTER TABLE clusters ADD COLUMN analyzed_events INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE digests ADD COLUMN dedupe_key TEXT;
+ALTER TABLE digests ADD COLUMN data_json TEXT;
+CREATE UNIQUE INDEX digests_dedupe ON digests(dedupe_key);
+
+ALTER TABLE notifications ADD COLUMN ref_kind TEXT;
+ALTER TABLE notifications ADD COLUMN ref_id INTEGER;
+
+CREATE TABLE deliveries (
+    id INTEGER PRIMARY KEY,
+    notification_id INTEGER NOT NULL REFERENCES notifications(id) ON DELETE CASCADE,
+    channel TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','sent','dead')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at TEXT,
+    last_error TEXT,
+    delivered_at TEXT,
+    UNIQUE (notification_id, channel)
+);
+
+CREATE TABLE source_health (
+    source_id INTEGER PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+    failures INTEGER NOT NULL DEFAULT 0,
+    open_until TEXT,
+    last_error TEXT,
+    last_ok_at TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE quota_usage (
+    connector TEXT NOT NULL,
+    day TEXT NOT NULL,
+    units INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (connector, day)
+);
+
+CREATE TABLE connector_probes (
+    connector TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    detail TEXT,
+    probed_at TEXT NOT NULL
+);
+
+CREATE TABLE config_drafts (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('watch','research')),
+    input_text TEXT NOT NULL,
+    draft_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','applied','rejected')),
+    target TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE feedback (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('event','cluster','digest','finding','source')),
+    target_id TEXT NOT NULL,
+    value TEXT NOT NULL CHECK (value IN ('more','less','known','useful','wrong')),
+    note TEXT
+);
+CREATE INDEX feedback_target ON feedback(target_kind, target_id);
+
+CREATE TABLE prune_log (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    criteria_json TEXT NOT NULL,
+    items INTEGER NOT NULL,
+    snapshots INTEGER NOT NULL,
+    chars INTEGER NOT NULL
+);
+
+CREATE TABLE publications (
+    id INTEGER PRIMARY KEY,
+    target TEXT NOT NULL,
+    ros_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    updated_at TEXT NOT NULL,
+    UNIQUE (target, ros_id)
+);
+
+CREATE TABLE idempotency (
+    key TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    resource_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE VIRTUAL TABLE findings_fts USING fts5(title, summary, content='findings', content_rowid='id');
+INSERT INTO findings_fts(rowid, title, summary) SELECT id, title, summary FROM findings;
+CREATE TRIGGER findings_ai AFTER INSERT ON findings BEGIN
+  INSERT INTO findings_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
+END;
+CREATE TRIGGER findings_ad AFTER DELETE ON findings BEGIN
+  INSERT INTO findings_fts(findings_fts, rowid, title, summary) VALUES ('delete', old.id, old.title, old.summary);
+END;
+
+CREATE VIRTUAL TABLE events_fts USING fts5(title, summary, content='events', content_rowid='id');
+CREATE TRIGGER events_ai AFTER INSERT ON events BEGIN
+  INSERT INTO events_fts(rowid, title, summary) VALUES (new.id, new.title, new.summary);
+END;
+CREATE TRIGGER events_ad AFTER DELETE ON events BEGIN
+  INSERT INTO events_fts(events_fts, rowid, title, summary) VALUES ('delete', old.id, old.title, old.summary);
+END;
+"""),
 ]
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def now_precise() -> str:
+    """UTC timestamp with microseconds: identity of an observation (two may happen in one second)."""
+    return datetime.now(timezone.utc).isoformat()
 
 
 def dumps(value: Any) -> str:
@@ -460,3 +608,9 @@ def _split_sql(sql: str) -> list[str]:
     if buf:
         statements.append("\n".join(buf))
     return statements
+
+
+def fts_query(text: str) -> str:
+    """Turn free user text into a safe FTS5 query: every word quoted, implicit AND."""
+    words = re.findall(r"\w+", text, flags=re.UNICODE)
+    return " ".join(f'"{w}"' for w in words) or '""'

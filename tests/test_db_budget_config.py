@@ -30,7 +30,7 @@ def test_refuses_checksum_drift(tmp_path, monkeypatch):
     path = tmp_path / "ros.db"
     Database(path).close()
     version, sql = dbmod.MIGRATIONS[0]
-    monkeypatch.setattr(dbmod, "MIGRATIONS", [(version, sql + "\n-- edited")])
+    monkeypatch.setattr(dbmod, "MIGRATIONS", [(version, sql + "\n-- edited"), *dbmod.MIGRATIONS[1:]])
     with pytest.raises(RuntimeError, match="checksum drift"):
         Database(path)
 

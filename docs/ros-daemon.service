@@ -1,0 +1,23 @@
+# Unidad de usuario de systemd para `ros daemon`.
+#   cp docs/ros-daemon.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now ros-daemon
+#   journalctl --user -u ros-daemon -f
+# Pon ANTHROPIC_API_KEY y demás secretos en ~/.config/ros/env (permisos 600).
+
+[Unit]
+Description=ROS daemon: seguimientos, digestos e investigaciones en cola
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=-%h/.config/ros/env
+ExecStart=%h/.local/bin/ros daemon --poll 30
+# SIGTERM: termina el paso actual, guarda el progreso y libera el bloqueo.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -16,20 +16,24 @@ Reglas para todas las fases:
 
 ---
 
-## Estado actual (lo que ya está en `main`)
+## Estado actual
 
-| Módulo | Qué hace | Estado |
-|---|---|---|
-| `ros/security.py` | SSRF por salto, límite de bytes, MIME permitidos, URL canónica, aislamiento anti prompt injection | Hecho; conexión fijada a la IP validada |
-| `ros/db.py` | SQLite + WAL, migraciones con checksum, FTS5, backup en línea, locks | Hecho; el esquema ya incluye tablas de seguimientos, eventos y digestos |
-| `ros/budget.py` | Reserva antes de gastar, tiempo que sobrevive a reinicios | Hecho |
-| `ros/llm.py` | Salidas JSON con esquema, coste medido, errores tipados, `FakeLLM` | Hecho y verificado contra el SDK 1.x |
-| `ros/connectors/` | RSS/Atom, YouTube (feed), Reddit (RSS), web con detección de cambios, buscadores | Hecho, con tests |
-| `ros/research/` | Investigación por rondas con checkpoints e informe Markdown trazable | Hecho, con tests de extremo a extremo |
-| `ros/cli.py` | Script `ros` | `ros research`; el resto llega en la Fase 1 |
-| `ros/offline.py` | Modo `llm="fake"` / `--offline` | Hecho |
-| `ros/monitor/` | Seguimientos, eventos, digestos | Vacío |
-| `tests/` | Tests sin red, en CI (GitHub Actions) | Hecho |
+Las fases 0–8 están implementadas. Cada fase indica abajo qué se construyó y dónde está.
+Lo que queda fuera de alcance sigue en la última sección.
+
+| Módulo | Qué hace |
+|---|---|
+| `ros/security.py` | SSRF por salto con conexión fijada a la IP validada, límite de bytes, MIME permitidos, URL canónica, aislamiento anti prompt injection |
+| `ros/db.py` | SQLite + WAL, migraciones con checksum (v1 base, v2 seguimientos/entrega/conocimiento), FTS5 en documentos, afirmaciones, hallazgos y eventos, backup en línea, locks |
+| `ros/budget.py` | Reserva antes de gastar, tiempo que sobrevive a reinicios |
+| `ros/llm.py` | Salidas JSON con esquema, coste medido, errores tipados, `FakeLLM` |
+| `ros/research/` | Investigación por rondas con checkpoints, plan revisable, cancelación, reanudación, informe trazable |
+| `ros/monitor/` | `spec` (WatchSpec), `service` (ingesta A/B), `correlate`, `digest` (alertas y digestos), `schedule`, `daemon`, `drafts` (lenguaje natural) |
+| `ros/connectors/` | Web, RSS/Atom, YouTube y Reddit por feed, búsqueda; `native.py`: YouTube Data API, Reddit OAuth, X, Instagram, Facebook |
+| `ros/knowledge.py` | Casi duplicados, conocimiento previo, reputación, feedback, poda, búsqueda en el corpus |
+| `ros/notify.py`, `ros/api.py`, `ros/obsidian.py` | Entrega externa, API local + panel, exportación a Obsidian |
+| `ros/cli.py` | Todas las órdenes `ros …` |
+| `tests/` | 136 tests sin red ni API keys, en CI (Python 3.11 y 3.12) |
 
 ---
 
@@ -59,7 +63,7 @@ Tareas:
 
 ---
 
-## Fase 1 — Investigación profunda usable desde la terminal
+## Fase 1 — Investigación profunda usable desde la terminal ✅
 
 **Objetivo:** que puedas usar ROS a diario para investigar.
 
@@ -74,9 +78,13 @@ Tareas:
 **Salida (criterios de specs):** 1 varias rondas · 2 el plan cambia según hallazgos · 3 límites respetados ·
 4 fuentes y evidencia · 5 reanudación · 11 hechos/inferencias/rumores · 12 errores y parciales · 13 historial.
 
+**Hecho:** todas las órdenes anteriores más `ros cancel` (detiene en un punto seguro y deja informe parcial) y
+`ros research --queue` (lo ejecuta el daemon). Un bloqueo por investigación impide ejecutarla en dos procesos.
+El plan también extrae del texto el foco, los dominios a excluir y si hay interpretaciones alternativas.
+
 ---
 
-## Fase 2 — Seguimientos (monitorización)
+## Fase 2 — Seguimientos (monitorización) ✅
 
 **Objetivo:** crear seguimientos sobre varias fuentes y detectar solo lo nuevo.
 
@@ -94,9 +102,15 @@ Tareas:
 **Salida:** 6 seguimiento sobre varias fuentes · 7 solo contenido nuevo · 8 sin duplicados.
 Ejecutar dos veces seguidas no genera eventos duplicados.
 
+**Hecho:** además, `ros watch history|delete|from-research`, línea base en la primera sincronización (`backfill`),
+cursores por seguimiento y fuente (dos seguimientos sobre el mismo feed ven sus items), copias exactas o casi
+idénticas de algo que el seguimiento ya tiene enlazadas como fuente adicional del evento (corroboración),
+profundidad `deep` que descarga la página completa cuando el feed trae solo un resumen, y diff contra la versión
+anterior cuando un item cambia. Las reglas de exclusión del usuario se aplican antes de gastar en el modelo.
+
 ---
 
-## Fase 3 — Correlación, digestos y alertas
+## Fase 3 — Correlación, digestos y alertas ✅
 
 **Objetivo:** dejar de notificar publicaciones sueltas y entregar informes agrupados.
 
@@ -109,9 +123,12 @@ Ejecutar dos veces seguidas no genera eventos duplicados.
 
 **Salida:** 9 relación entre fuentes · 10 informe acumulado. Repetir la generación no duplica digestos.
 
+**Hecho:** `ros events <seguimiento>`, tope diario de alertas (las que sobran van al digest), digestos que se
+generan aunque falle el modelo (marcados como limitados) y sección de cobertura con las fuentes que fallaron.
+
 ---
 
-## Fase 4 — Scheduler y daemon
+## Fase 4 — Scheduler y daemon ✅
 
 **Objetivo:** que los seguimientos corran solos y resistan reinicios.
 
@@ -124,9 +141,14 @@ Ejecutar dos veces seguidas no genera eventos duplicados.
 
 **Salida:** un seguimiento programado se ejecuta, se cae a mitad, y al reiniciar el daemon termina sin duplicar nada.
 
+**Hecho:** `ros daemon [--once]`, expiración de seguimientos con duración, tope global de gasto diario
+(`monitor_daily_cost_usd`), recuperación de análisis pendientes limitada para no entrar en bucle y unidad de
+ejemplo en `docs/ros-daemon.service`. La ventana de recuperación y el circuit breaker están en
+`ros/monitor/daemon.py` y `ros/monitor/service.py`.
+
 ---
 
-## Fase 5 — Configuración en lenguaje natural
+## Fase 5 — Configuración en lenguaje natural ✅
 
 **Objetivo:** escribir "Revisa estas fuentes cada 4 horas y dame un informe al final del día" y obtener una configuración revisable.
 
@@ -138,9 +160,13 @@ Ejecutar dos veces seguidas no genera eventos duplicados.
 
 **Salida:** las cuatro frases de ejemplo de specs producen configuraciones correctas y editables (tests con `FakeLLM`).
 
+**Hecho:** `ros draft "…"` detecta si es investigación o seguimiento; `ros watch add --from-text` y
+`ros watch edit --from-text` (con diff). Los borradores quedan guardados en `config_drafts`. En modo offline un
+intérprete por reglas sustituye al modelo, así que las frases de ejemplo funcionan sin API key.
+
 ---
 
-## Fase 6 — Conectores nativos (APIs oficiales)
+## Fase 6 — Conectores nativos (APIs oficiales) ✅
 
 - Contrato ampliado: `capabilities()`, `status` (`unconfigured`, `ready`, `degraded`, `auth_expired`, `quota_blocked`…)
   y una sonda real antes de anunciar el conector como disponible.
@@ -149,9 +175,14 @@ Ejecutar dos veces seguidas no genera eventos duplicados.
 - X, Instagram y Facebook solo si consigues acceso oficial; mientras tanto se muestran como `unconfigured` y nunca se sustituyen por scraping.
 - Tests de contrato con fixtures, más tests en vivo opcionales con credenciales.
 
+**Hecho:** `ros connectors [--probe]`. Además de YouTube y Reddit, X (API v2), Instagram (business discovery) y
+Facebook (Páginas) existen como conectores de API oficial, pero solo se activan con credenciales y una sonda
+correcta. **Están probados contra fixtures con la forma documentada de cada API, no contra los servicios reales:**
+conviene una prueba en vivo con tus credenciales antes de confiar en ellos.
+
 ---
 
-## Fase 7 — Memoria de conocimiento y calidad de la evidencia
+## Fase 7 — Memoria de conocimiento y calidad de la evidencia ✅
 
 - Reutilizar hallazgos de investigaciones anteriores como contexto ("lo que ya se sabe") sin tratarlos como evidencia nueva.
 - Reputación de fuente por dimensiones (autoridad, independencia, fuente primaria, conflictos de interés).
@@ -159,13 +190,23 @@ Ejecutar dos veces seguidas no genera eventos duplicados.
 - Retención por niveles (texto completo frente a metadatos) y `ros prune` auditable.
 - Feedback explícito ("más de esto", "ya lo sabía") que cambia la prioridad sin borrar historial.
 
+**Hecho:** `ros sources`, `ros feedback`, `ros prune`, `ros search` (también sobre hallazgos y eventos). La
+reputación se calcula a partir de lo almacenado (se puede reconstruir) y desempata la selección de fuentes
+después de la diversidad. El feedback multiplica la importancia de eventos parecidos (±15 % por voto, entre 0,5 y
+1,5) y el motivo queda guardado en el evento.
+
 ---
 
-## Fase 8 — Interfaces y entrega
+## Fase 8 — Interfaces y entrega ✅
 
 - Notificaciones externas: email, webhook o Telegram, con entrega idempotente.
 - API local (FastAPI en `127.0.0.1`, con token) y un dashboard sencillo de solo lectura.
 - Exportación unidireccional a Obsidian.
+
+**Hecho:** `ros deliver` y entrega automática desde el daemon (webhook firmado con HMAC e `Idempotency-Key`,
+Telegram, email). `ros serve`: API en `/api/v1` con token en `~/.ros/api_token` (permisos 600), panel de solo lectura
+con enlace de acceso de un solo uso, validación de `Host` y mutaciones solo con token. `ros obsidian`: bloques
+gestionados con checksum, conflicto si los editas a mano, escritura atómica y rutas confinadas al vault.
 
 ---
 
@@ -176,19 +217,19 @@ como trabajo futuro y se pueden retomar cuando las fases 0–5 estén sólidas.
 
 ## Mapa de criterios de aceptación (specs.txt)
 
-| # | Criterio | Fase |
-|---:|---|---|
-| 1 | Investigación de varias rondas | 0–1 |
-| 2 | Modificar el plan según hallazgos | 1 |
-| 3 | Respetar todos los límites | 0–1 |
-| 4 | Mostrar fuentes y evidencia | 1 |
-| 5 | Reanudar una tarea interrumpida | 1 (investigación), 4 (seguimientos) |
-| 6 | Seguimiento sobre varias fuentes | 2 |
-| 7 | Detectar solo contenido nuevo | 2 |
-| 8 | Evitar duplicados | 2 |
-| 9 | Relacionar eventos entre fuentes | 3 |
-| 10 | Informe acumulado | 3 |
-| 11 | Hechos, inferencias y rumores | 1 |
-| 12 | Explicar errores y parciales | 0–1 |
-| 13 | Conservar historial | 1–2 |
-| 14 | Contenido externo no controla al agente | 0 (y en cada fase) |
+| # | Criterio | Fase | Tests |
+|---:|---|---|---|
+| 1 | Investigación de varias rondas | 0–1 | `test_research_engine::test_adaptive_multi_round_research` |
+| 2 | Modificar el plan según hallazgos | 1 | ídem (subtema descubierto, versión 2 del plan) |
+| 3 | Respetar todos los límites | 0–1 | `test_budget_exhaustion_…`, `test_source_cap_…`, `test_db_budget_config` |
+| 4 | Mostrar fuentes y evidencia | 1 | informe con `## Evidencia` y fuentes; `test_cli::test_research_lifecycle` |
+| 5 | Reanudar una tarea interrumpida | 1, 4 | `test_interrupted_run_resumes_…`, `test_crash_between_ingest_and_analysis_…`, `test_shutdown_request_requeues_the_run` |
+| 6 | Seguimiento sobre varias fuentes | 2 | `test_monitor::test_only_new_content_and_no_duplicates` |
+| 7 | Detectar solo contenido nuevo | 2 | ídem (segunda ejecución sin eventos; item editado → `modified`) |
+| 8 | Evitar duplicados | 2 | `test_cross_source_duplicate_…`, `test_near_duplicates_…`, digestos idempotentes |
+| 9 | Relacionar eventos entre fuentes | 3 | `test_correlation_alerts_and_idempotent_digest` |
+| 10 | Informe acumulado | 3 | ídem y `test_daemon_schedules_watches_and_digests` |
+| 11 | Hechos, inferencias y rumores | 1 | tipos de afirmación en informes y digestos |
+| 12 | Explicar errores y parciales | 0–1 | `ros errors`, sección de errores/cobertura, `test_failing_source_opens_circuit_…` |
+| 13 | Conservar historial | 1–2 | versiones de plan y de seguimiento, ejecuciones conservadas al borrar un seguimiento |
+| 14 | Contenido externo no controla al agente | 0 (y en cada fase) | `test_security`, detección de inyección en extracción y triaje |

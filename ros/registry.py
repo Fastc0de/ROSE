@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from .config import Settings
 from .connectors.base import SearchBackend
 from .connectors.feeds import FeedConnector, RedditConnector, WebPageConnector, YouTubeConnector
+from .connectors.native import (FacebookConnector, InstagramConnector, RedditAPIConnector, XAPIConnector,
+                                YouTubeAPIConnector)
 from .connectors.search import BraveBackend, DuckDuckGoBackend, SearchWatchConnector, SearxngBackend
 from .db import Database
 from .errors import ErrorKind, RosError
@@ -37,8 +39,7 @@ class App:
     def connector(self, kind: str):
         if kind not in self.connectors:
             raise RosError(ErrorKind.UNSUPPORTED_FORMAT,
-                           f"tipo de fuente no soportado: {kind!r}. Disponibles: {', '.join(sorted(self.connectors))}. "
-                           "Instagram, Facebook y X no están disponibles: requieren APIs oficiales autorizadas.")
+                           f"tipo de fuente no soportado: {kind!r}. Tipos: {', '.join(sorted(self.connectors))}.")
         return self.connectors[kind]
 
 
@@ -63,14 +64,28 @@ def build_llm(settings: Settings, role: str, shared: LLM | None = None) -> LLM:
     raise ValueError(f"unknown llm {settings.llm!r}")
 
 
-def build_connectors(fetcher: SafeFetcher, search: SearchBackend) -> dict:
-    return {
+def build_connectors(fetcher: SafeFetcher, search: SearchBackend, db: Database | None = None,
+                     settings: Settings | None = None, env: dict | None = None) -> dict:
+    connectors = {
         "rss": FeedConnector(fetcher),
         "youtube": YouTubeConnector(fetcher),
         "reddit": RedditConnector(fetcher),
         "web": WebPageConnector(fetcher),
         "search": SearchWatchConnector(search, fetcher),
     }
+    if db is not None:
+        s = settings or Settings()
+        connectors.update({
+            "youtube_api": YouTubeAPIConnector(db, key_env=s.youtube_api_key_env, daily_quota=s.youtube_daily_quota,
+                                               env=env),
+            "reddit_api": RedditAPIConnector(db, id_env=s.reddit_client_id_env, secret_env=s.reddit_client_secret_env,
+                                             env=env),
+            "x": XAPIConnector(db, token_env=s.x_bearer_token_env, env=env),
+            "instagram": InstagramConnector(db, token_env=s.meta_access_token_env, ig_user_id=s.instagram_user_id,
+                                            env=env),
+            "facebook": FacebookConnector(db, token_env=s.meta_access_token_env, env=env),
+        })
+    return connectors
 
 
 def build_app(settings: Settings, *, llm: LLM | None = None, search: SearchBackend | None = None,
@@ -78,4 +93,4 @@ def build_app(settings: Settings, *, llm: LLM | None = None, search: SearchBacke
     db = db or Database(settings.db_path)
     fetcher = fetcher or SafeFetcher(max_bytes=settings.max_fetch_bytes)
     search = search or build_search(settings)
-    return App(settings, db, llm, fetcher, search, build_connectors(fetcher, search))
+    return App(settings, db, llm, fetcher, search, build_connectors(fetcher, search, db, settings))

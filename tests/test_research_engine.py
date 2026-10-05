@@ -185,7 +185,7 @@ def test_cli_offline_research_writes_report(site, fetcher, tmp_path, monkeypatch
     monkeypatch.delenv("ROS_LLM", raising=False)
     monkeypatch.chdir(tmp_path)
     out = tmp_path / "informe.md"
-    code = main(["research", "baterías de sodio", "--offline", "--max-rounds", "2", "-o", str(out)],
+    code = main(["research", "baterías de sodio", "--offline", "--max-rounds", "2", "-o", str(out), "--yes"],
                 build_app=lambda s: build_app(s, search=search_engine(), fetcher=fetcher))
     assert code == 0
     report = out.read_text()

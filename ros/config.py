@@ -41,6 +41,33 @@ class Settings:
     doc_chars: int = 12_000                 # max characters of one document sent to the model
     exclude_domains: tuple[str, ...] = ()
     budget: Budget = field(default_factory=Budget)
+    timezone: str = "UTC"                   # IANA zone for schedules ("a las 20:00")
+    # Monitoring: global hard cap on model spend by all watches per UTC day.
+    monitor_daily_cost_usd: float = 3.0
+    # Native connectors (official APIs). Only the NAME of the env var holding each secret is stored.
+    youtube_api_key_env: str = "YOUTUBE_API_KEY"
+    youtube_daily_quota: int = 10_000
+    reddit_client_id_env: str = "REDDIT_CLIENT_ID"
+    reddit_client_secret_env: str = "REDDIT_CLIENT_SECRET"
+    x_bearer_token_env: str = "X_BEARER_TOKEN"
+    meta_access_token_env: str = "META_ACCESS_TOKEN"
+    instagram_user_id: str = ""             # professional account used for business discovery
+    # Delivery of alerts/digests outside the local inbox. Empty = channel off.
+    notify_kinds: tuple[str, ...] = ("alert", "digest", "attention")
+    notify_webhook_url: str = ""
+    notify_webhook_secret_env: str = "ROS_WEBHOOK_SECRET"
+    notify_telegram_chat_id: str = ""
+    notify_telegram_token_env: str = "ROS_TELEGRAM_TOKEN"
+    notify_email_to: str = ""
+    notify_email_from: str = ""
+    notify_smtp_host: str = ""
+    notify_smtp_port: int = 587
+    notify_smtp_user: str = ""
+    notify_smtp_password_env: str = "ROS_SMTP_PASSWORD"
+    # Local API / dashboard (loopback only unless explicitly changed).
+    api_host: str = "127.0.0.1"
+    api_port: int = 8765
+    obsidian_vault: str = ""
 
     def role(self, name: str) -> tuple[str, str]:
         """(model, effort) for a role: orchestrator | validator | worker."""
@@ -51,6 +78,7 @@ class Settings:
     def redacted(self) -> dict[str, Any]:
         data = asdict(self)
         data["exclude_domains"] = list(self.exclude_domains)
+        data["notify_kinds"] = list(self.notify_kinds)
         return data
 
 
@@ -59,6 +87,7 @@ ROLES = ("orchestrator", "validator", "worker")
 ENV_MAP = {
     "ROS_DB": "db_path", "ROS_REPORTS_DIR": "reports_dir", "ROS_LLM": "llm", "ROS_SEARCH": "search_backend",
     "ROS_SEARXNG_URL": "searxng_url", "ANTHROPIC_WORKSPACE_ID": "anthropic_workspace_id",
+    "ROS_TIMEZONE": "timezone", "ROS_OBSIDIAN_VAULT": "obsidian_vault",
     **{f"ROS_{r.upper()}_MODEL": f"{r}_model" for r in ROLES},
     **{f"ROS_{r.upper()}_EFFORT": f"{r}_effort" for r in ROLES},
 }
@@ -73,8 +102,9 @@ def _apply(settings: Settings, data: dict[str, Any], origin: str) -> Settings:
     if "budget" in data:
         merged = {**settings.budget.to_dict(), **data["budget"]}
         data["budget"] = Budget.from_dict(merged)
-    if "exclude_domains" in data:
-        data["exclude_domains"] = tuple(data["exclude_domains"])
+    for key in ("exclude_domains", "notify_kinds"):
+        if key in data:
+            data[key] = tuple(data[key])
     return replace(settings, **data)
 
 

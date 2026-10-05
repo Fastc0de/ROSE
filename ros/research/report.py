@@ -35,7 +35,7 @@ def render_report(db: Database, run_id: int, *, synthesis: dict | None, stop_rea
     title = (synthesis or {}).get("title") or run["objective"]
     out.append(f"# {title}\n")
     out.append(f"> **Objetivo:** {run['objective']}  ")
-    state = "✅ Completa" if status == "completed" else ("◐ Parcial" if status == "partial" else "✖ Fallida")
+    state = {"completed": "✅ Completa", "partial": "◐ Parcial", "cancelled": "■ Cancelada"}.get(status, "✖ Fallida")
     out.append(f"> **Estado:** {state} · investigación #{run_id} · {run['created_at'][:16].replace('T', ' ')} UTC  ")
     if stop_reason:
         out.append(f"> **Motivo de cierre:** {stop_reason}  ")

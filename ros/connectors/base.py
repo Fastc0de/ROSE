@@ -21,6 +21,21 @@ class Capabilities:
     notes: str = ""
 
 
+STATES = ("unconfigured", "ready", "degraded", "unsupported", "auth_expired", "permission_blocked", "quota_blocked")
+
+
+@dataclass
+class ConnectorStatus:
+    """Whether a connector can be selected. Only 'ready' and 'degraded' may run."""
+    state: str
+    detail: str = ""
+    probed_at: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        return self.state in ("ready", "degraded")
+
+
 @dataclass
 class SourceSpec:
     kind: str          # connector id
@@ -60,6 +75,7 @@ class Connector(Protocol):
     connector_id: str
 
     def capabilities(self) -> Capabilities: ...
+    def status(self) -> ConnectorStatus: ...
     def validate(self, locator: str) -> SourceSpec: ...
     def sync(self, spec: SourceSpec, cursor: dict[str, Any] | None) -> SyncResult: ...
 
