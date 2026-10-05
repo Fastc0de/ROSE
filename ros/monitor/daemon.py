@@ -14,14 +14,12 @@ and releases the lock. Everything is restartable: state lives in SQLite, not in 
 
 from __future__ import annotations
 
-import os
 import signal
 import time
-import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
-from ..db import now_iso
+from ..db import lock_owner, now_iso
 from ..errors import RosError
 from ..registry import App
 from .digest import build_digest
@@ -40,7 +38,7 @@ class Daemon:
         self.clock = clock or SystemClock()
         self.echo = echo
         self.sleep = sleep
-        self.owner = f"daemon-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self.owner = lock_owner("daemon|")
         self.stopping = False
 
     # ------------------------------------------------------------------ lifecycle

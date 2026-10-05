@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import socket
 import sqlite3
 import threading
 import time
@@ -449,6 +451,32 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+def lock_owner(prefix: str = "") -> str:
+    """Lock owner identity: host and pid let a dead owner on this machine be detected at once."""
+    import uuid
+    return f"{prefix}{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
+
+
+def owner_alive(owner: str) -> bool:
+    """False only when the owner is provably a dead process on this host; unknown formats count as alive."""
+    parts = owner.rsplit(":", 2)
+    if len(parts) != 3 or not parts[1].isdigit():
+        return True
+    host = parts[0].split("|")[-1]
+    if host != socket.gethostname():
+        return True
+    pid = int(parts[1])
+    if pid == os.getpid():
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def now_precise() -> str:
     """UTC timestamp with microseconds: identity of an observation (two may happen in one second)."""
     return datetime.now(timezone.utc).isoformat()
@@ -563,7 +591,7 @@ class Database:
         now = time.time()
         with self.tx():
             row = self.one("SELECT owner, expires_at FROM locks WHERE name=?", (name,))
-            if row and row["owner"] != owner and row["expires_at"] > now:
+            if row and row["owner"] != owner and row["expires_at"] > now and owner_alive(row["owner"]):
                 return False
             self.execute("INSERT OR REPLACE INTO locks VALUES (?,?,?)", (name, owner, now + ttl))
             return True

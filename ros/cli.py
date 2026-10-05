@@ -925,9 +925,26 @@ COMMANDS = {"research": cmd_research, "runs": cmd_runs, "show": cmd_show, "resum
             "obsidian": cmd_obsidian, "deliver": cmd_deliver}
 
 
+def _sigterm_as_interrupt(command: str) -> None:
+    """SIGTERM (kill, timeout, systemd) pauses like Ctrl+C: progress saved, lock released, resumable.
+    The daemon installs its own graceful handler."""
+    import signal
+    if command == "daemon":
+        return
+
+    def handler(signum, frame):
+        raise KeyboardInterrupt
+
+    try:
+        signal.signal(signal.SIGTERM, handler)
+    except ValueError:  # not in the main thread
+        pass
+
+
 def main(argv: list[str] | None = None, *, build_app=None) -> int:
     """`build_app(settings) -> App` can be injected (tests use fakes for network and model)."""
     args = _parser().parse_args(argv)
+    _sigterm_as_interrupt(args.command)
     try:
         return COMMANDS[args.command](args, build_app)
     except NeedsUserAction as exc:

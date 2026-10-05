@@ -10,10 +10,8 @@ re-searching, re-fetching or re-extracting what is already stored.
 
 from __future__ import annotations
 
-import os
 import re
 import time
-import uuid
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
@@ -21,7 +19,7 @@ from typing import Callable
 from ..budget import Budget, Ledger
 from ..connectors.base import NormalizedItem
 from ..connectors.feeds import WebPageConnector, host_of
-from ..db import dumps, loads, now_iso, text_hash
+from ..db import dumps, loads, lock_owner, now_iso, text_hash
 from ..errors import BudgetExhausted, ErrorKind, RosError
 from ..knowledge import find_near_duplicate, prior_knowledge, source_reputation
 from ..registry import App
@@ -59,7 +57,7 @@ class ResearchEngine:
         self.echo = echo
         self.sleep = sleep
         self.stop_requested = stop_requested
-        self.owner = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self.owner = lock_owner()
         self._run_id: int | None = None
 
     # ------------------------------------------------------------------ setup

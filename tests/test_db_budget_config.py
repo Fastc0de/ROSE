@@ -191,3 +191,16 @@ def test_role_models_per_provider(isolated, monkeypatch):
     assert s.role("orchestrator") == ("claude-opus-5-5", "medium")
     assert s.role("validator") == ("claude-sonnet-5-5", "medium")
     assert s.role("worker") == ("openai/gpt-x", "")
+
+
+def test_lock_of_a_dead_process_on_this_host_is_released(db):
+    import socket
+    import subprocess
+    import sys
+    from ros.db import lock_owner
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait()                                              # a pid that no longer exists
+    dead = f"{socket.gethostname()}:{child.pid}:abcd1234"
+    assert db.acquire_lock("run:1", dead, ttl=600)
+    assert db.acquire_lock("run:1", lock_owner(), ttl=600)    # taken over at once, no 10-minute wait
+    assert not db.acquire_lock("run:1", f"otra-maquina:{child.pid}:x", ttl=600)   # other hosts: honour the TTL
